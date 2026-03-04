@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
     algorithm: str = "HS256"
+    sso_private_key_path: str 
     jwt_issuer: str = "agrofusion-backendauth"
     # Configuración de correo SMTP
     smtp_host: str
