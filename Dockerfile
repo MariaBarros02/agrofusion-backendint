@@ -18,4 +18,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 EXPOSE 9109
 
 # 7. Comando de arranque en el puerto 9001
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9101"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9109"]
