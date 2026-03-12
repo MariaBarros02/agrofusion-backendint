@@ -7,14 +7,15 @@ WORKDIR /app
 # 3. Copiar dependencias
 COPY requirements.txt .
 
+# Copia los archivos del backend al contenedor
+COPY . /app/
+
 # 4. Instalar librerías
 RUN pip install --no-cache-dir -r requirements.txt
 
-# 5. Copiar el código fuente
-COPY . .
 
 # 6. Exponer el puerto de Integración
-EXPOSE 9001
+EXPOSE 9109
 
 # 7. Comando de arranque en el puerto 9001
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9001"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9101"]
