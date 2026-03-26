@@ -77,4 +77,4 @@ jobs:
           context: .
           push: true
           # IMPORTANTE: Aquí arreglamos también el nombre y la etiqueta de la Tarea 2 para que quede perfecto
-          tags: tags: ghcr.io/mariabarros02/agrofusion-int:1.0.0-staging
+          tags: ghcr.io/mariabarros02/agrofusion-int:1.0.0-staging
