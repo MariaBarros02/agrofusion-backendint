@@ -21,3 +21,5 @@ from app.models.af_permissions import AfPermission
 from app.models.af_roles_permissions import AfRolePermission 
 from app.models.af_roles import AfRole
 from app.models.af_user_project_roles import AfUserProjectRole
+from app.models.af_accounting_queue import AfAccountingQueue
+from app.models.af_accounting_transfers import AfAccountingTransfer
