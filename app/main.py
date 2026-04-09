@@ -33,7 +33,9 @@ app.add_middleware(
 )
 # Registro de rutas relacionadas con integración
 app.include_router(router_integration)
-
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
 if __name__ == "__main__":
     uvicorn.run(
         "app.main:app",
