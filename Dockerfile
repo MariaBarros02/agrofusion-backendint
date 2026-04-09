@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 
 # 6. Exponer el puerto de Integración
-EXPOSE 9109
+EXPOSE 8002
 
 # 7. Comando de arranque en el puerto 9001
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "9109"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8002"]

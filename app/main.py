@@ -11,12 +11,14 @@ import uvicorn
 from app.routes.integration import router as router_integration
 
 app = FastAPI(
+    root_path="/agrofusion/int",
     title="API Inmero - Backend Integración Agrofusion",
     version="1.0.0",
     description="API de integración para el backend de Agrofusion, encargada de la transferencia de datos entre sistemas."
 )
 # Orígenes permitidos para solicitudes CORS (frontend)
 origins = [
+    "https://inmero.co/agrofusion"
     "http://localhost:5173",
     "http://localhost:3000",
     "http://127.0.0.1:5173",
