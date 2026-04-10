@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from app.routes.integration import router as router_integration
+from app.routes.checks import router as router_checks
 
 app = FastAPI(
     root_path="/agrofusion/int",
@@ -22,6 +23,7 @@ origins = [
     "http://localhost:5173",
     "http://localhost:3000",
     "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
 ]
 # Middleware CORS para permitir comunicación entre frontend y backend
 app.add_middleware(
@@ -36,6 +38,9 @@ app.include_router(router_integration)
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}
+
+app.include_router(router_checks)
+
 if __name__ == "__main__":
     uvicorn.run(
         "app.main:app",
