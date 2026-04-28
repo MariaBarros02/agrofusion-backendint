@@ -1,5 +1,5 @@
-from datetime import datetime
-from typing import List, Optional
+from datetime import date, datetime
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -62,6 +62,25 @@ class CheckListItemResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class CheckDetailResponse(CheckListItemResponse):
+    queue_id: str = Field(..., description="Identificador de la cola contable")
+    source_project_id: str = Field(..., description="Identificador del proyecto origen")
+    source_module_code: Optional[str] = Field(None, description="Código del módulo origen")
+    accounting_date: Optional[date] = Field(None, description="Fecha contable")
+    sent_at: Optional[datetime] = Field(None, description="Fecha de envío")
+    acknowledged_at: Optional[datetime] = Field(None, description="Fecha de acuse")
+    accounting_entry_id: Optional[str] = Field(None, description="Identificador del asiento contable externo")
+    response_json: Optional[Dict[str, Any]] = Field(None, description="Respuesta del sistema contable")
+    payload_json: Dict[str, Any] = Field(..., description="Payload enviado al sistema contable")
+    transaction_data: Dict[str, Any] = Field(..., description="Datos originales de la transacción")
+    error_message: Optional[str] = Field(None, description="Mensaje de error del envío")
+    retry_count: Optional[int] = Field(None, description="Cantidad de reintentos")
+    queue_status: Optional[str] = Field(None, description="Estado de la cola")
+    attempts: Optional[int] = Field(None, description="Intentos de la cola")
+    max_attempts: Optional[int] = Field(None, description="Máximo de intentos")
+    last_error: Optional[str] = Field(None, description="Último error de la cola")
 
 
 class PaginatedChecksResponse(BaseModel):

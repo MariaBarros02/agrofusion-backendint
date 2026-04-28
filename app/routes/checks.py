@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.dependences.auth import get_current_user
 from app.schemas.checks import (
+    CheckDetailResponse,
     ListChecksRequest,
     PaginatedChecksResponse,
     CheckTypeListResponse,
@@ -93,6 +94,21 @@ def list_transaction_types(
     """
     service = ChecksService()
     return service.list_transaction_types(db, current_user)
+
+
+@router.get(
+    "/{check_id}",
+    response_model=CheckDetailResponse,
+    summary="Detalle de comprobante",
+    description="Retorna el detalle de un comprobante generado por integraciones contables.",
+)
+def get_check_detail(
+    check_id: str,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user),
+):
+    service = ChecksService()
+    return service.get_check_detail(db, check_id, current_user)
 
 
 @router.get(

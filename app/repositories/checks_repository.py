@@ -8,6 +8,56 @@ from app.models.users import Users
 
 
 class ChecksRepository:
+    def get_check_detail(self, db: Session, check_id: str):
+        """
+        Consulta el detalle de un comprobante contable por su identificador.
+        """
+        return (
+            db.query(
+                AfAccountingTransfer.transfer_id.label("id"),
+                AfAccountingTransfer.queue_id.label("queue_id"),
+                AfAccountingTransfer.source_project_id.label("source_project_id"),
+                AfAccountingTransfer.transaction_type.label("transaction_type"),
+                AfAccountingTransfer.payload_json.label("payload_json"),
+                AfAccountingTransfer.transfer_status.label("state"),
+                AfAccountingTransfer.sent_at.label("sent_at"),
+                AfAccountingTransfer.acknowledged_at.label("acknowledged_at"),
+                AfAccountingTransfer.accounting_entry_id.label("accounting_entry_id"),
+                AfAccountingTransfer.response_json.label("response_json"),
+                AfAccountingTransfer.error_message.label("error_message"),
+                AfAccountingTransfer.retry_count.label("retry_count"),
+                AfAccountingQueue.source_module_code.label("source_module_code"),
+                AfAccountingQueue.transaction_data.label("transaction_data"),
+                AfAccountingQueue.accounting_date.label("accounting_date"),
+                AfAccountingQueue.status.label("queue_status"),
+                AfAccountingQueue.attempts.label("attempts"),
+                AfAccountingQueue.max_attempts.label("max_attempts"),
+                AfAccountingQueue.last_error.label("last_error"),
+                AfAccountingQueue.created_at.label("issued_at"),
+                AfExternalProject.project_name.label("project_name"),
+                AfExternalProject.instance_code.label("project_code"),
+                cast(
+                    AfAccountingTransfer.payload_json["total"].astext,
+                    Numeric
+                ).label("amount"),
+                Users.name.label("issued_by"),
+            )
+            .join(
+                AfAccountingQueue,
+                AfAccountingQueue.queue_id == AfAccountingTransfer.queue_id
+            )
+            .join(
+                AfExternalProject,
+                AfExternalProject.external_project_id == AfAccountingTransfer.source_project_id
+            )
+            .join(
+                Users,
+                Users.user_id == AfAccountingQueue.user_id
+            )
+            .filter(cast(AfAccountingTransfer.transfer_id, String) == check_id)
+            .first()
+        )
+
     def get_list_checks(self, db: Session, payload):
         """
         Consulta el listado de comprobantes con filtros dinámicos y paginación.

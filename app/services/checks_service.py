@@ -7,6 +7,7 @@ from app.core.errors import int_error
 from app.repositories.checks_repository import ChecksRepository
 from app.schemas.checks import (
     ListChecksRequest,
+    CheckDetailResponse,
     CheckListItemResponse,
     PaginatedChecksResponse,
     CheckTypeOptionResponse,
@@ -19,6 +20,55 @@ class ChecksService:
     def __init__(self):
         self.repo = ChecksRepository()
         self.perm_service = PermissionsService()
+
+    def get_check_detail(
+        self,
+        db: Session,
+        check_id: str,
+        current_user: dict
+    ):
+        """
+        Retorna el detalle de un comprobante contable.
+        """
+        if not self.perm_service.validate_permission(
+            db,
+            current_user.get("role"),
+            "043"
+        ):
+            int_error("AUTH_INSUFFICIENT_PERMISSIONS", status.HTTP_403_FORBIDDEN)
+
+        row = self.repo.get_check_detail(db, check_id)
+        if not row:
+            int_error("CHECK_NOT_FOUND", status.HTTP_404_NOT_FOUND)
+
+        return CheckDetailResponse(
+            id=str(row.id),
+            queue_id=str(row.queue_id),
+            source_project_id=str(row.source_project_id),
+            transaction_type=row.transaction_type,
+            project_name=row.project_name,
+            project_code=row.project_code,
+            state=row.state,
+            issued_at=row.issued_at,
+            amount=float(row.amount) if row.amount is not None else None,
+            issued_by=row.issued_by,
+            source_module_code=row.source_module_code,
+            accounting_date=row.accounting_date,
+            sent_at=row.sent_at,
+            acknowledged_at=row.acknowledged_at,
+            accounting_entry_id=(
+                str(row.accounting_entry_id) if row.accounting_entry_id else None
+            ),
+            response_json=row.response_json,
+            payload_json=row.payload_json,
+            transaction_data=row.transaction_data,
+            error_message=row.error_message,
+            retry_count=row.retry_count,
+            queue_status=row.queue_status,
+            attempts=row.attempts,
+            max_attempts=row.max_attempts,
+            last_error=row.last_error,
+        )
 
     def list_checks(
 
