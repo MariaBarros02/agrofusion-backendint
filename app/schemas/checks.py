@@ -1,3 +1,6 @@
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
 from datetime import date, datetime
 from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
@@ -39,8 +42,16 @@ class ListChecksRequest(BaseModel):
 
 
 class CheckTypeOptionResponse(BaseModel):
-    value: str = Field(..., description="Valor interno normalizado del tipo", example="nomina contable")
-    label: str = Field(..., description="Etiqueta visible del tipo", example="NOMINA CONTABLE")
+    value: str = Field(
+        ...,
+        description="Valor interno normalizado del tipo",
+        example="nomina contable"
+    )
+    label: str = Field(
+        ...,
+        description="Etiqueta visible del tipo",
+        example="NOMINA CONTABLE"
+    )
 
 
 class CheckTypeListResponse(BaseModel):
@@ -51,14 +62,46 @@ class CheckTypeListResponse(BaseModel):
 
 
 class CheckListItemResponse(BaseModel):
-    id: str = Field(..., description="Identificador único del comprobante", example="251f571")
-    transaction_type: str = Field(..., description="Tipo de comprobante", example="NOMINA CONTABLE")
-    project_name: Optional[str] = Field(None, description="Nombre del proyecto", example="SIGMA")
-    project_code: Optional[str] = Field(None, description="Código del proyecto", example="SIGMA")
-    state: str = Field(..., description="Estado del comprobante", example="Fallido")
-    issued_at: Optional[datetime] = Field(None, description="Fecha de emisión", example="2026-03-27T10:30:00")
-    amount: Optional[float] = Field(None, description="Valor total del comprobante", example=2500000.0)
-    issued_by: Optional[str] = Field(None, description="Usuario que emitió el comprobante", example="Carlos Pérez")
+    id: str = Field(
+        ...,
+        description="Identificador único del comprobante",
+        example="251f571"
+    )
+    transaction_type: str = Field(
+        ...,
+        description="Tipo de comprobante",
+        example="NOMINA CONTABLE"
+    )
+    project_name: Optional[str] = Field(
+        None,
+        description="Nombre del proyecto",
+        example="SIGMA"
+    )
+    project_code: Optional[str] = Field(
+        None,
+        description="Código del proyecto",
+        example="SIGMA"
+    )
+    state: str = Field(
+        ...,
+        description="Estado del comprobante",
+        example="Fallido"
+    )
+    issued_at: Optional[datetime] = Field(
+        None,
+        description="Fecha de emisión",
+        example="2026-03-27T10:30:00"
+    )
+    amount: Optional[float] = Field(
+        None,
+        description="Valor total del comprobante",
+        example=2500000.0
+    )
+    issued_by: Optional[str] = Field(
+        None,
+        description="Usuario que emitió el comprobante",
+        example="Carlos Pérez"
+    )
 
     class Config:
         from_attributes = True
@@ -89,3 +132,510 @@ class PaginatedChecksResponse(BaseModel):
     page: int = Field(..., description="Página actual", example=1)
     size: int = Field(..., description="Cantidad de registros por página", example=5)
     total_pages: int = Field(..., description="Total de páginas disponibles", example=5)
+
+    items: List[CheckListItemResponse] = Field(
+        ...,
+        description="Listado de comprobantes"
+    )
+    total: int = Field(
+        ...,
+        description="Total de registros encontrados",
+        example=25
+    )
+    page: int = Field(
+        ...,
+        description="Página actual",
+        example=1
+    )
+    size: int = Field(
+        ...,
+        description="Cantidad de registros por página",
+        example=5
+    )
+    total_pages: int = Field(
+        ...,
+        description="Total de páginas disponibles",
+        example=5
+    )
+
+
+class AccountingConsultRequest(BaseModel):
+    external_project_id: str = Field(
+        ...,
+        description="Identificador del proyecto externo",
+        example="6f1f9f9c-7e84-4d8f-a7f7-123456789abc"
+    )
+    external_endpoint_id: str = Field(
+        ...,
+        description="Identificador del endpoint externo configurado",
+        example="9d8f9f9c-7e84-4d8f-a7f7-987654321abc"
+    )
+    sincePeriod: str = Field(
+        ...,
+        description="Fecha inicial del periodo de consulta",
+        example="2025-04-01"
+    )
+    untilPeriod: str = Field(
+        ...,
+        description="Fecha final del periodo de consulta",
+        example="2025-04-30"
+    )
+
+
+class AccountingRequestedPeriod(BaseModel):
+    From: str = Field(
+        ...,
+        description="Fecha inicial solicitada",
+        example="2025-04-01"
+    )
+    To: str = Field(
+        ...,
+        description="Fecha final solicitada",
+        example="2025-04-30"
+    )
+
+
+class AccountingSourceSystem(BaseModel):
+    SystemId: str = Field(
+        ...,
+        description="Identificador del sistema origen",
+        example="disriego-prod-01"
+    )
+    SystemName: str = Field(
+        ...,
+        description="Nombre del sistema origen",
+        example="Disriego"
+    )
+    SystemNIT: str = Field(
+        ...,
+        description="NIT del sistema origen",
+        example="901724254"
+    )
+    Environment: str = Field(
+        ...,
+        description="Ambiente del sistema origen",
+        example="production"
+    )
+
+
+class AccountingMetadata(BaseModel):
+    ExchangeId: str = Field(
+        ...,
+        description="Identificador único del intercambio",
+        example="AF-2026-04-000001"
+    )
+    GeneratedAt: str = Field(
+        ...,
+        description="Fecha de generación de la respuesta",
+        example="2026-04-21T02:04:24.456911"
+    )
+    StandardVersion: str = Field(
+        ...,
+        description="Versión del estándar de intercambio",
+        example="1.0"
+    )
+    RequestedPeriod: AccountingRequestedPeriod = Field(
+        ...,
+        description="Periodo solicitado"
+    )
+    SourceSystem: AccountingSourceSystem = Field(
+        ...,
+        description="Información del sistema origen"
+    )
+    GeneratedBy: str = Field(
+        ...,
+        description="Usuario o sistema que generó la respuesta",
+        example="disriego-api"
+    )
+
+
+class AccountingSummary(BaseModel):
+    TotalDocuments: int = Field(
+        ...,
+        description="Total de documentos encontrados",
+        example=18
+    )
+    TotalInvoices: int = Field(
+        ...,
+        description="Total de facturas encontradas",
+        example=12
+    )
+    TotalTransactions: int = Field(
+        ...,
+        description="Total de transacciones encontradas",
+        example=6
+    )
+    TotalGrossAmount: float = Field(
+        ...,
+        description="Valor bruto total",
+        example=2500000.0
+    )
+    TotalNet: float = Field(
+        ...,
+        description="Valor neto total",
+        example=2300000.0
+    )
+    Currency: str = Field(
+        ...,
+        description="Moneda de los valores",
+        example="COP"
+    )
+
+
+class AccountingDocumentType(BaseModel):
+    Code: str = Field(
+        ...,
+        description="Código del tipo de documento",
+        example="FV"
+    )
+    Name: str = Field(
+        ...,
+        description="Nombre del tipo de documento",
+        example="Factura de venta"
+    )
+
+
+class AccountingInvoiceHeader(BaseModel):
+    DocumentId: str = Field(
+        ...,
+        description="Identificador del documento",
+        example="FV-001"
+    )
+    Prefix: str = Field(
+        ...,
+        description="Prefijo del documento",
+        example="FV"
+    )
+    Serial: str = Field(
+        ...,
+        description="Número o serial del documento",
+        example="001"
+    )
+    Type: AccountingDocumentType = Field(
+        ...,
+        description="Tipo de documento"
+    )
+    IssueDate: str = Field(
+        ...,
+        description="Fecha de emisión",
+        example="2025-04-01"
+    )
+    DueDate: str = Field(
+        ...,
+        description="Fecha de vencimiento",
+        example="2025-04-30"
+    )
+    Status: str = Field(
+        ...,
+        description="Estado del documento",
+        example="Emitida"
+    )
+    UpdatedAt: str = Field(
+        ...,
+        description="Fecha de última actualización",
+        example="2025-04-01T10:00:00"
+    )
+
+
+class AccountingThirdParty(BaseModel):
+    NIT: str = Field(
+        ...,
+        description="Identificación tributaria del tercero",
+        example="900123456"
+    )
+    Name: str = Field(
+        ...,
+        description="Nombre del tercero",
+        example="Cliente de prueba"
+    )
+    Address: Optional[str] = Field(
+        None,
+        description="Dirección del tercero",
+        example="Calle 123"
+    )
+    City: Optional[str] = Field(
+        None,
+        description="Ciudad del tercero",
+        example="Neiva"
+    )
+    Country: Optional[str] = Field(
+        None,
+        description="País del tercero",
+        example="Colombia"
+    )
+    Email: Optional[str] = Field(
+        None,
+        description="Correo electrónico del tercero",
+        example="cliente@correo.com"
+    )
+
+
+class AccountingInvoiceTotals(BaseModel):
+    Subtotal: float = Field(
+        ...,
+        description="Subtotal de la factura",
+        example=1000000.0
+    )
+    TotalVAT: float = Field(
+        ...,
+        description="Total de IVA",
+        example=190000.0
+    )
+    TotalWithholdings: float = Field(
+        ...,
+        description="Total de retenciones",
+        example=0.0
+    )
+    TotalDiscounts: float = Field(
+        ...,
+        description="Total de descuentos",
+        example=0.0
+    )
+    TotalPayment: float = Field(
+        ...,
+        description="Valor total a pagar",
+        example=1190000.0
+    )
+    OutstandingBalance: float = Field(
+        ...,
+        description="Saldo pendiente",
+        example=0.0
+    )
+
+
+class AccountingInvoiceLine(BaseModel):
+    Code: str = Field(
+        ...,
+        description="Código del concepto o línea",
+        example="SERV-001"
+    )
+    Name: str = Field(
+        ...,
+        description="Nombre del concepto o línea",
+        example="Servicio de riego"
+    )
+    Description: str = Field(
+        ...,
+        description="Descripción de la línea",
+        example="Servicio facturado"
+    )
+    LineType: str = Field(
+        ...,
+        description="Tipo de línea",
+        example="service"
+    )
+    accounting_account: List[str] = Field(
+        ...,
+        description="Cuentas contables asociadas a la línea",
+        example=["41013"]
+    )
+    Quantity: float = Field(
+        ...,
+        description="Cantidad facturada",
+        example=1
+    )
+    UnitPrice: float = Field(
+        ...,
+        description="Valor unitario",
+        example=1000000.0
+    )
+    Value: float = Field(
+        ...,
+        description="Valor total de la línea",
+        example=1000000.0
+    )
+    Taxes: List[Any] = Field(
+        default_factory=list,
+        description="Listado de impuestos asociados a la línea",
+        example=[]
+    )
+
+
+class AccountingInvoice(BaseModel):
+    Header: AccountingInvoiceHeader = Field(
+        ...,
+        description="Encabezado de la factura"
+    )
+    ThirdParty: AccountingThirdParty = Field(
+        ...,
+        description="Información del tercero"
+    )
+    Totals: AccountingInvoiceTotals = Field(
+        ...,
+        description="Totales de la factura"
+    )
+    Lines: List[AccountingInvoiceLine] = Field(
+        ...,
+        description="Líneas o detalles de la factura"
+    )
+
+
+class AccountingPaymentMethod(BaseModel):
+    Code: str = Field(
+        ...,
+        description="Código del medio de pago",
+        example="TRANSFER"
+    )
+
+
+class AccountingTransaction(BaseModel):
+    DocumentId: str = Field(
+        ...,
+        description="Identificador de la transacción",
+        example="TRX-001"
+    )
+    Date: str = Field(
+        ...,
+        description="Fecha de la transacción",
+        example="2025-04-15"
+    )
+    RelatedInvoiceId: str = Field(
+        ...,
+        description="Factura relacionada",
+        example="FV-001"
+    )
+    ThirdParty: AccountingThirdParty = Field(
+        ...,
+        description="Información del tercero"
+    )
+    Amount: float = Field(
+        ...,
+        description="Valor de la transacción",
+        example=1190000.0
+    )
+    Currency: str = Field(
+        ...,
+        description="Moneda de la transacción",
+        example="COP"
+    )
+    Status: str = Field(
+        ...,
+        description="Estado de la transacción",
+        example="Aplicado"
+    )
+    Notes: str = Field(
+        ...,
+        description="Notas de la transacción",
+        example="Pago aplicado a factura"
+    )
+    UpdatedAt: str = Field(
+        ...,
+        description="Fecha de última actualización",
+        example="2025-04-15T12:00:00"
+    )
+    Type: AccountingDocumentType = Field(
+        ...,
+        description="Tipo de transacción"
+    )
+    PaymentMethod: AccountingPaymentMethod = Field(
+        ...,
+        description="Método de pago"
+    )
+
+
+class AccountingConsultResponse(BaseModel):
+    metadata: AccountingMetadata = Field(
+        ...,
+        description="Metadatos de la consulta contable"
+    )
+    summary: AccountingSummary = Field(
+        ...,
+        description="Resumen general de la consulta contable"
+    )
+    invoices: List[AccountingInvoice] = Field(
+        ...,
+        description="Listado de facturas"
+    )
+    transactions: List[AccountingTransaction] = Field(
+        ...,
+        description="Listado de transacciones"
+    )
+
+
+# ============================================================
+# RF-INT-30 - Transferencia de lote contable a contabilidad
+# ============================================================
+
+class AccountingTransferRequest(BaseModel):
+    external_project_id: str = Field(
+        ...,
+        description="Identificador del proyecto externo origen",
+        example="6baa50f1-91e0-4eab-96bb-44b4ea380ddc"
+    )
+    normalized_json: Dict[str, Any] = Field(
+        ...,
+        description="JSON normalizado recibido desde el proyecto externo y enviado a contabilidad",
+        example={
+            "metadata": {
+                "ExchangeId": "AF-2026-04-000051",
+                "GeneratedAt": "2026-04-14T10:00:00-05:00",
+                "StandardVersion": "1.0",
+                "RequestedPeriod": {
+                    "From": "2025-05-01",
+                    "To": "2025-05-31"
+                },
+                "SourceSystem": {
+                    "SystemId": "disriego-prod-01",
+                    "SystemName": "Disriego",
+                    "SystemNIT": "900123456",
+                    "Environment": "production"
+                },
+                "GeneratedBy": "agrofusion-integration-service"
+            },
+            "summary": {
+                "TotalDocuments": 2,
+                "TotalInvoices": 1,
+                "TotalTransactions": 1,
+                "TotalGrossAmount": 976500.0,
+                "TotalNet": 976500.0,
+                "Currency": "COP"
+            },
+            "invoices": [],
+            "transactions": []
+        }
+    )
+
+
+class AccountingTransferAccountingResponse(BaseModel):
+    success: Optional[bool] = Field(
+        None,
+        description="Indica si contabilidad recibió correctamente el lote",
+        example=True
+    )
+    exchangeId: Optional[str] = Field(
+        None,
+        description="Identificador del lote recibido por contabilidad",
+        example="AF-2026-04-00001"
+    )
+    batchId: Optional[int] = Field(
+        None,
+        description="Identificador interno del lote en contabilidad",
+        example=42
+    )
+    status: Optional[str] = Field(
+        None,
+        description="Estado inicial reportado por contabilidad",
+        example="RECEIVED"
+    )
+
+
+class AccountingTransferResponse(BaseModel):
+    success: bool = Field(
+        ...,
+        description="Indica si el envío del lote fue exitoso",
+        example=True
+    )
+    message_code: str = Field(
+        ...,
+        description="Código internacionalizable para mostrar en frontend",
+        example="ACCOUNTING_TRANSFER_SENT"
+    )
+    transfer_id: Optional[str] = Field(
+        None,
+        description="Identificador del lote registrado en af_accounting_transfers",
+        example="90640c8a-2bd8-40fc-b652-e68b960a19e0"
+    )
+    accounting_response: AccountingTransferAccountingResponse = Field(
+        ...,
+        description="Respuesta recibida desde contabilidad"
+    )
