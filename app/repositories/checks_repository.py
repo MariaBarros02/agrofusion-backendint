@@ -982,7 +982,6 @@ class ChecksRepository:
 
         return result
 
-
     def update_accounting_transfer_ack(
         self,
         db: Session,
@@ -990,100 +989,70 @@ class ChecksRepository:
         transfer_status: str,
         acknowledged_at,
         response_json,
-        error_message,
+        error_message=None,          # solo se usa cuando transfer_status == "failed"
     ):
-        """
-        Actualiza af_accounting_transfers tras recibir el ACK de contabilidad.
-
-        Exitoso:
-            transfer_status = sent
-            acknowledged_at = now()
-            response_json = payload ACK
-            error_message = null
-
-        Fallido:
-            transfer_status = failed
-            acknowledged_at = now()
-            response_json = null
-            error_message = payload ACK
-        """
-
         response_json_text = (
             json.dumps(response_json, ensure_ascii=False, default=str)
             if response_json is not None
             else None
         )
 
-        error_message_text = (
-            json.dumps(error_message, ensure_ascii=False, default=str)
-            if error_message is not None
-            else None
-        )
+        # error_message solo en failed; en partial queda NULL
+        if transfer_status == "failed":
+            error_message_text = response_json_text          # copia del ACK
+        else:
+            error_message_text = None                        # partial → NULL
 
         query = text("""
             UPDATE public.af_accounting_transfers
             SET
-                transfer_status  = :transfer_status,
-                acknowledged_at  = :acknowledged_at,
-                response_json    = CAST(:response_json AS jsonb),
-                error_message    = :error_message
+                transfer_status = :transfer_status,
+                acknowledged_at = :acknowledged_at,
+                response_json   = CAST(:response_json AS jsonb),
+                error_message   = :error_message
             WHERE transfer_id = CAST(:transfer_id AS uuid)
         """)
 
-        db.execute(
-            query,
-            {
-                "transfer_status": transfer_status,
-                "acknowledged_at": acknowledged_at,
-                "response_json":   response_json_text,
-                "error_message":   error_message_text,
-                "transfer_id":     transfer_id,
-            }
-        )
+        db.execute(query, {
+            "transfer_status": transfer_status,
+            "acknowledged_at": acknowledged_at,
+            "response_json":   response_json_text,
+            "error_message":   error_message_text,
+            "transfer_id":     transfer_id,
+        })
 
-        print("==============================================")
-        print("af_accounting_transfers ACTUALIZADO POR ACK")
-        print("TRANSFER_ID:", transfer_id)
-        print("TRANSFER_STATUS:", transfer_status)
-        print("ACKNOWLEDGED_AT:", acknowledged_at)
-        print("==============================================")
-
-    def update_audit_receipt_sent(
+    def update_accounting_queue_status(
         self,
         db: Session,
-        accounting_transfer_id: str,
-        document_id: str,
+        transfer_id: str,
+        queue_status: str,
+        processed_at,
     ):
-        """
-        Marca como 'sent' el af_audit_receipt cuyo payload->>'documentId'
-        coincida con document_id.
-
-        Se usa en lotes PARTIAL para los documentos que sí fueron procesados
-        exitosamente, sin tocar failed_at ni error_log.
-        """
-
         query = text("""
-            UPDATE public.af_audit_receipts
-            SET status = 'sent'
-            WHERE
-                accounting_transfer_id = CAST(:accounting_transfer_id AS uuid)
-                AND payload->>'documentId' = :document_id
+            UPDATE public.af_accounting_queue q
+            SET
+                status       = :queue_status,
+                processed_at = :processed_at
+            FROM public.af_accounting_transfers t
+            WHERE t.queue_id   = q.queue_id
+            AND t.transfer_id = CAST(:transfer_id AS uuid)
         """)
 
-        result = db.execute(
-            query,
-            {
-                "accounting_transfer_id": accounting_transfer_id,
-                "document_id": document_id,
-            }
-        )
+        result = db.execute(query, {
+            "queue_status": queue_status,
+            "processed_at": processed_at,
+            "transfer_id":  transfer_id,
+        })
 
         print("==============================================")
-        print("af_audit_receipt MARCADO COMO SENT (PARCIAL)")
-        print("ACCOUNTING_TRANSFER_ID:", accounting_transfer_id)
-        print("DOCUMENT_ID:", document_id)
+        print("af_accounting_queue ACTUALIZADO POR ACK")
+        print("TRANSFER_ID:",     transfer_id)
+        print("STATUS:",          queue_status)
+        print("PROCESSED_AT:",    processed_at)
         print("FILAS AFECTADAS:", result.rowcount)
         print("==============================================")
+            
+
     def update_audit_receipts_status(
         self,
         db: Session,
@@ -1117,6 +1086,34 @@ class ChecksRepository:
         print("STATUS:", status)
         print("FILAS AFECTADAS:", result.rowcount)
         print("==============================================")
+    def update_audit_receipt_sent(
+        self,
+        db: Session,
+        accounting_transfer_id: str,
+        document_id: str,
+    ):
+        query = text("""
+            UPDATE public.af_audit_receipts
+            SET status = 'sent'
+            WHERE
+                accounting_transfer_id = :accounting_transfer_id
+                AND (
+                    payload->>'DocumentId' = :document_id
+                    OR payload->'Header'->>'DocumentId' = :document_id
+                )
+        """)
+
+        result = db.execute(query, {
+            "accounting_transfer_id": accounting_transfer_id,
+            "document_id": document_id,
+        })
+
+        print("==============================================")
+        print("af_audit_receipt MARCADO COMO SENT (PARCIAL)")
+        print("ACCOUNTING_TRANSFER_ID:", accounting_transfer_id)
+        print("DOCUMENT_ID:", document_id)
+        print("FILAS AFECTADAS:", result.rowcount)
+        print("==============================================")
 
 
     def update_audit_receipt_failed(
@@ -1127,48 +1124,34 @@ class ChecksRepository:
         failed_at,
         error_log: dict,
     ):
-        """
-        Marca como fallido el af_audit_receipt cuyo
-        payload->>'documentId' coincida con el document_id
-        reportado en failedDocuments del ACK.
-
-        Actualiza:
-            status     = sent
-            failed_at  = now()
-            error_log  = fragmento del error del documento
-        """
-
-        error_log_text = json.dumps(
-            error_log,
-            ensure_ascii=False,
-            default=str
-        )
+        error_log_text = json.dumps(error_log, ensure_ascii=False, default=str)
 
         query = text("""
             UPDATE public.af_audit_receipts
             SET
-                status    = 'sent',
+                status    = 'failed',
                 failed_at = :failed_at,
-                error_log = CAST(:error_log AS jsonb)
+                error_log = :error_log
             WHERE
-                accounting_transfer_id = CAST(:accounting_transfer_id AS uuid)
-                AND payload->>'documentId' = :document_id
+                accounting_transfer_id = :accounting_transfer_id
+                AND (
+                    payload->>'DocumentId' = :document_id
+                    OR payload->'Header'->>'DocumentId' = :document_id
+                )
         """)
 
-        result = db.execute(
-            query,
-            {
-                "failed_at":               failed_at,
-                "error_log":               error_log_text,
-                "accounting_transfer_id":  accounting_transfer_id,
-                "document_id":             document_id,
-            }
-        )
+        result = db.execute(query, {
+            "failed_at":              failed_at,
+            "error_log":              error_log_text,
+            "accounting_transfer_id": accounting_transfer_id,
+            "document_id":            document_id,
+        })
 
         print("==============================================")
-        print("af_audit_receipt MARCADO COMO FALLIDO")
+        print("af_audit_receipt MARCADO COMO FAILED")
         print("ACCOUNTING_TRANSFER_ID:", accounting_transfer_id)
-        print("DOCUMENT_ID:", document_id)
-        print("FAILED_AT:", failed_at)
-        print("FILAS AFECTADAS:", result.rowcount)
+        print("DOCUMENT_ID:",           document_id)
+        print("FAILED_AT:",             failed_at)
+        print("ERROR_LOG:",             error_log_text)
+        print("FILAS AFECTADAS:",       result.rowcount)
         print("==============================================")

@@ -342,7 +342,7 @@ class AccountingInvoiceHeader(BaseModel):
 
 
 class AccountingThirdParty(BaseModel):
-    NIT: str = Field(
+    NIT:Optional[str]  = Field(
         ...,
         description="Identificación tributaria del tercero",
         example="900123456"
