@@ -27,10 +27,11 @@ class AfAccountingTransfer(Base):
     transfer_status = Column(String(20), nullable=False, default="sent")
     sent_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     acknowledged_at = Column(DateTime(timezone=True), nullable=True)
-    accounting_entry_id = Column(UUID(as_uuid=True), nullable=True)
+    accounting_entry_id = Column(String, nullable=True)
     response_json = Column(JSONB, nullable=True)
     error_message = Column(Text, nullable=True)
     retry_count = Column(Integer, nullable=True, default=0)
+    external_endpoint_id = Column(UUID(as_uuid=True), nullable=True)
 
     queue = relationship("AfAccountingQueue")
     project = relationship("AfExternalProject")

@@ -12,6 +12,9 @@ from app.schemas.checks import (
     AccountingConsultResponse,
     AccountingTransferRequest,
     AccountingTransferResponse,
+    AccountingACKRequest,
+    AccountingACKResponse,
+    AccountingACKRequest
 )
 from app.services.checks_service import ChecksService
 
@@ -668,5 +671,99 @@ def transfer_accounting_batch(
         user_agent=user_agent,
     )
 
+
+
+@router.post(
+    "/accounting-ACK",
+    summary="Recibir confirmación de procesamiento de lote contable",
+    description="""
+        Endpoint público que recibe la confirmación (ACK) del procesamiento de un lote contable
+        enviado previamente a contabilidad.
+
+        Según el estado recibido:
+        - Si status=PROCESSED: actualiza el lote como enviado y sus recibos de auditoría.
+        - Si hay documentos fallidos: marca el lote como fallido y registra los errores por documento.
+
+        Registra auditoría de la operación en af_audit_log.
+    """,
+    responses={
+        200: {
+            "description": "ACK procesado exitosamente",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "message_code": "ACCOUNTING_ACK_PROCESSED",
+                        "exchange_id": "AF-2026-04-00001"
+                    }
+                }
+            },
+        },
+        400: {
+            "description": "Payload de ACK inválido o exchangeId faltante",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "exchange_id_required": {
+                            "summary": "ExchangeId obligatorio",
+                            "value": {
+                                "detail": {
+                                    "code": "ACCOUNTING_ACK_EXCHANGE_ID_REQUIRED",
+                                    "meta": {}
+                                }
+                            }
+                        },
+                        "status_required": {
+                            "summary": "Status obligatorio",
+                            "value": {
+                                "detail": {
+                                    "code": "ACCOUNTING_ACK_STATUS_REQUIRED",
+                                    "meta": {}
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        },
+        404: {
+            "description": "No se encontró el lote contable para el exchangeId recibido",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": {
+                            "code": "ACCOUNTING_ACK_TRANSFER_NOT_FOUND",
+                            "meta": {}
+                        }
+                    }
+                }
+            },
+        },
+    },
+)
+def accounting_ack(
+    request: Request,
+    payload: AccountingACKRequest,
+    db: Session = Depends(get_db),
+):
+    service = ChecksService()
+
+    ip = request.headers.get("x-forwarded-for")
+
+    if ip:
+        ip = ip.split(",")[0].strip()
+    elif request.client:
+        ip = request.client.host
+    else:
+        ip = None
+
+    user_agent = request.headers.get("user-agent")
+
+    return service.process_accounting_ack(
+        db=db,
+        payload=payload,
+        ip=ip,
+        user_agent=user_agent,
+    )
 
 router.include_router(vouchers_router)

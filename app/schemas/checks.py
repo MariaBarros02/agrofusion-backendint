@@ -67,6 +67,10 @@ class CheckListItemResponse(BaseModel):
         description="Identificador único del comprobante",
         example="251f571"
     )
+    accounting_entry_id: Optional[str] = Field(
+        None,
+        description="Identificador del asiento contable externo"
+    )
     transaction_type: str = Field(
         ...,
         description="Tipo de comprobante",
@@ -338,7 +342,7 @@ class AccountingInvoiceHeader(BaseModel):
 
 
 class AccountingThirdParty(BaseModel):
-    NIT: str = Field(
+    NIT:Optional[str]  = Field(
         ...,
         description="Identificación tributaria del tercero",
         example="900123456"
@@ -562,6 +566,11 @@ class AccountingTransferRequest(BaseModel):
         description="Identificador del proyecto externo origen",
         example="6baa50f1-91e0-4eab-96bb-44b4ea380ddc"
     )
+    external_endpoint_id: str = Field(
+        ...,
+        description="Identificador del endpoint externo",
+        example="endpoint-001"
+    )
     normalized_json: Dict[str, Any] = Field(
         ...,
         description="JSON normalizado recibido desde el proyecto externo y enviado a contabilidad",
@@ -639,3 +648,27 @@ class AccountingTransferResponse(BaseModel):
         ...,
         description="Respuesta recibida desde contabilidad"
     )
+
+
+class ACKDocumentResult(BaseModel):
+    documentId: str
+    documentType: str
+    status: str
+    accountingEntryId: Optional[int] = None
+    errorCode: Optional[str] = None
+    errorMessage: Optional[str] = None
+
+
+class AccountingACKRequest(BaseModel):
+    exchangeId: str
+    batchId: int
+    status: str
+    processedAt: Optional[str] = None
+    processedDocuments: Optional[List[ACKDocumentResult]] = []
+    failedDocuments: Optional[List[ACKDocumentResult]] = []
+
+
+class AccountingACKResponse(BaseModel):
+    success: bool
+    message_code: str
+    exchange_id: str

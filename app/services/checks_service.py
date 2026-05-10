@@ -1,16 +1,20 @@
 import json
 import math
 from datetime import datetime
+from pydoc import text
 from uuid import uuid4
-
+import random
 import httpx
 from fastapi import status
 from sqlalchemy.orm import Session
+from datetime import datetime, timezone, timedelta
 
 from app.core.errors import int_error
 from app.repositories.checks_repository import ChecksRepository
 from app.repositories.audit_repository import AuditRepository
 from app.schemas.checks import (
+    AccountingACKRequest,
+    AccountingACKResponse,
     ListChecksRequest,
     CheckDetailResponse,
     CheckListItemResponse,
@@ -117,6 +121,7 @@ class ChecksService:
                 id=str(row.id),
                 transaction_type=row.transaction_type,
                 project_name=row.project_name,
+                accounting_entry_id=row.accounting_entry_id,
                 project_code=row.project_code,
                 state=row.state,
                 issued_at=row.issued_at,
@@ -203,10 +208,11 @@ class ChecksService:
 
             if endpoint_config is None:
                 int_error("EXTERNAL_ENDPOINT_NOT_FOUND", status.HTTP_404_NOT_FOUND)
-
+            print("ENDPOINT: ", payload.external_endpoint_id)
             overlapping_transfer = self.repo.get_overlapping_accounting_transfer_period(
                 db,
                 payload.external_project_id,
+                payload.external_endpoint_id,
                 payload.sincePeriod,
                 payload.untilPeriod
             )
@@ -348,6 +354,19 @@ class ChecksService:
 
             try:
                 result = AccountingConsultResponse(**data)
+
+
+                random_suffix = f"{random.randint(0, 9999999):07d}"
+                current_exchange_id = result.metadata.ExchangeId
+                parts = current_exchange_id.split("-")
+                parts[-1] = random_suffix
+
+                result.metadata.ExchangeId = "-".join(parts)
+
+                # #PRUEBAAA
+                # result.metadata.SourceSystem.SystemNIT = "9001766666"
+                # result.metadata.GeneratedAt = datetime.now(timezone.utc).isoformat(timespec='microseconds')
+
             except Exception as ex:
                 print("RESPUESTA EXTERNA NO CUMPLE EL CONTRATO ESPERADO")
                 print("ERROR:", type(ex).__name__)
@@ -413,6 +432,7 @@ class ChecksService:
                 current_user.get("role"),
                 "043"
             ):
+                print('Sin permiso')
                 int_error("AUTH_INSUFFICIENT_PERMISSIONS", status.HTTP_403_FORBIDDEN)
 
             if not payload.external_project_id or not payload.external_project_id.strip():
@@ -423,8 +443,9 @@ class ChecksService:
 
             transfer_endpoint = self.repo.get_accounting_transfer_endpoint(
                 db=db,
-                external_project_id=payload.external_project_id
+                external_project_id= payload.external_project_id,
             )
+
 
             if transfer_endpoint is None:
                 int_error("ACCOUNTING_TRANSFER_ENDPOINT_NOT_FOUND", status.HTTP_404_NOT_FOUND)
@@ -497,83 +518,126 @@ class ChecksService:
             # 2. Eliminar o comentar el bloque de respuesta simulada.
             # ============================================================
 
-            # try:
-            #     response = httpx.request(
-            #         method=http_method,
-            #         url=str(url),
-            #         json=payload.normalized_json,
-            #         headers=headers,
-            #         timeout=60.0,
-            #         trust_env=False
-            #     )
-            #
-            # except httpx.TimeoutException as ex:
-            #     print("TIMEOUT ENVIANDO LOTE A CONTABILIDAD:", type(ex).__name__)
-            #     print("DETALLE:", str(ex))
-            #     print("URL:", url)
-            #
-            #     int_error("ACCOUNTING_TRANSFER_SEND_ERROR", status.HTTP_502_BAD_GATEWAY)
-            #
-            # except httpx.RequestError as ex:
-            #     print("ERROR ENVIANDO LOTE A CONTABILIDAD:", type(ex).__name__)
-            #     print("DETALLE:", str(ex))
-            #     print("URL:", url)
-            #
-            #     int_error("ACCOUNTING_TRANSFER_SEND_ERROR", status.HTTP_502_BAD_GATEWAY)
-            #
-            # except Exception as ex:
-            #     print("ERROR NO CONTROLADO ENVIANDO LOTE A CONTABILIDAD:", type(ex).__name__)
-            #     print("DETALLE:", str(ex))
-            #     print("URL:", url)
-            #
-            #     int_error("ACCOUNTING_TRANSFER_SEND_ERROR", status.HTTP_502_BAD_GATEWAY)
-            #
-            # if response.status_code < 200 or response.status_code >= 300:
-            #     print("CONTABILIDAD RESPONDIÓ ERROR")
-            #     print("STATUS CODE:", response.status_code)
-            #     print("RESPONSE TEXT:", response.text)
-            #
-            #     int_error("ACCOUNTING_TRANSFER_SEND_ERROR", status.HTTP_502_BAD_GATEWAY)
-            #
-            # try:
-            #     accounting_response_data = response.json()
-            # except ValueError:
-            #     print("CONTABILIDAD NO DEVOLVIÓ JSON VÁLIDO")
-            #     print("STATUS CODE:", response.status_code)
-            #     print("RESPONSE TEXT:", response.text)
-            #
-            #     int_error("ACCOUNTING_TRANSFER_INVALID_RESPONSE", status.HTTP_502_BAD_GATEWAY)
+            try:
+                response = httpx.request(
+                    method=http_method,
+                    url=str(url),
+                    json=payload.normalized_json,
+                    headers=headers,
+                    timeout=60.0,
+                    trust_env=False
+                )
+            
+            except httpx.TimeoutException as ex:
+                print("TIMEOUT ENVIANDO LOTE A CONTABILIDAD:", type(ex).__name__)
+                print("DETALLE:", str(ex))
+                print("URL:", url)
+            
+                int_error("ACCOUNTING_TRANSFER_SEND_ERROR", status.HTTP_502_BAD_GATEWAY, meta={
+                    "error_type": type(ex).__name__,
+                    "detail": str(ex),
+                    "url": url,
+                    "external_response": None  # No hay respuesta porque fue timeout
+                })
+            
+            except httpx.RequestError as ex:
+                print("ERROR ENVIANDO LOTE A CONTABILIDAD:", type(ex).__name__)
+                print("DETALLE:", str(ex))
+                print("URL:", url)
+            
+                 # Intentar parsear la respuesta como JSON si es posible
+                external_response_data = None
+                try:
+                    external_response_data = response.json()
+                except:
+                    external_response_data = {"raw_text": response.text}
+                
+                int_error(
+                    "ACCOUNTING_TRANSFER_SEND_ERROR", 
+                    status.HTTP_502_BAD_GATEWAY,
+                    meta=external_response_data
+                    
+                )
+            
+            except Exception as ex:
+                print("ERROR NO CONTROLADO ENVIANDO LOTE A CONTABILIDAD:", type(ex).__name__)
+                print("DETALLE:", str(ex))
+                print("URL:", url)
 
-            # ============================================================
-            # RESPUESTA SIMULADA SEGÚN REQUERIMIENTO
-            # ============================================================
+                # Intentar parsear la respuesta como JSON si es posible
+                external_response_data = None
+                try:
+                    external_response_data = response.json()
+                except:
+                    external_response_data = {"raw_text": response.text}
+                
+                int_error(
+                    "ACCOUNTING_TRANSFER_SEND_ERROR", 
+                    status.HTTP_502_BAD_GATEWAY,
+                    meta=external_response_data
+                    
+                )
+            
+            if response.status_code < 200 or response.status_code >= 300:
+                print("CONTABILIDAD RESPONDIÓ ERROR")
+                print("STATUS CODE:", response.status_code)
+                print("RESPONSE TEXT:", response.text)
 
-            metadata = payload.normalized_json.get("metadata") or {}
-            original_exchange_id = metadata.get("ExchangeId")
+                # Intentar parsear la respuesta como JSON si es posible
+                external_response_data = None
+                try:
+                    external_response_data = response.json()
+                except:
+                    external_response_data = {"raw_text": response.text}
+                
+                int_error(
+                    "ACCOUNTING_TRANSFER_SEND_ERROR", 
+                    status.HTTP_502_BAD_GATEWAY,
+                    meta=external_response_data
+                    
+                )
+                        
+            try:
+                accounting_response_data = response.json()
+                print
+            except ValueError:
+                print("CONTABILIDAD NO DEVOLVIÓ JSON VÁLIDO")
+                print("STATUS CODE:", response.status_code)
+                print("RESPONSE TEXT:", response.text)
+            
+                int_error("ACCOUNTING_TRANSFER_INVALID_RESPONSE", status.HTTP_502_BAD_GATEWAY)
 
-            # La BD espera UUID en af_accounting_transfers.accounting_entry_id.
-            # Por eso la simulación devuelve un UUID válido como exchangeId.
-            simulated_exchange_id = str(uuid4())
-            simulated_batch_id = int(datetime.utcnow().strftime("%H%M%S"))
+            # # ============================================================
+            # # RESPUESTA SIMULADA SEGÚN REQUERIMIENTO
+            # # ============================================================
 
-            accounting_response_data = {
-                "success": True,
-                "exchangeId": simulated_exchange_id,
-                "batchId": simulated_batch_id,
-                "status": "RECEIVED"
-            }
+            # metadata = payload.normalized_json.get("metadata") or {}
+            # original_exchange_id = metadata.get("ExchangeId")
 
-            print("==============================================")
-            print("RESPUESTA SIMULADA DE CONTABILIDAD")
-            print("EXCHANGE ID ORIGINAL DEL JSON:", original_exchange_id)
-            print("EXCHANGE ID SIMULADO UUID PARA BD:", simulated_exchange_id)
-            print("DATA:", accounting_response_data)
-            print("==============================================")
+            # # La BD espera UUID en af_accounting_transfers.accounting_entry_id.
+            # # Por eso la simulación devuelve un UUID válido como exchangeId.
+            # simulated_exchange_id =  original_exchange_id
+            # simulated_batch_id = int(datetime.utcnow().strftime("%H%M%S"))
+
+            # accounting_response_data = {
+            #     "success": True,
+            #     "exchangeId": simulated_exchange_id,
+            #     "batchId": simulated_batch_id,
+            #     "status": "RECEIVED"
+            # }
+
+            # print("==============================================")
+            # print("RESPUESTA SIMULADA DE CONTABILIDAD")
+            # print("EXCHANGE ID ORIGINAL DEL JSON:", original_exchange_id)
+            # print("EXCHANGE ID SIMULADO UUID PARA BD:", simulated_exchange_id)
+            # print("DATA:", accounting_response_data)
+            # print("==============================================")
 
             try:
                 accounting_response = AccountingTransferAccountingResponse(
                     **accounting_response_data
                 )
+                print("RESPUESTA DE CONTABILIDAD PARSEADA CON ÉXITO")
             except Exception as ex:
                 print("RESPUESTA DE CONTABILIDAD NO CUMPLE EL CONTRATO ESPERADO")
                 print("ERROR:", type(ex).__name__)
@@ -585,8 +649,19 @@ class ChecksService:
             if accounting_response.success is False:
                 print("CONTABILIDAD REPORTÓ RESPUESTA NEGATIVA")
                 print("DATA:", accounting_response_data)
-
-                int_error("ACCOUNTING_TRANSFER_SEND_ERROR", status.HTTP_502_BAD_GATEWAY)
+                 # Intentar parsear la respuesta como JSON si es posible
+                external_response_data = None
+                try:
+                    external_response_data = response.json()
+                except:
+                    external_response_data = {"raw_text": response.text}
+                
+                int_error(
+                    "ACCOUNTING_TRANSFER_SEND_ERROR", 
+                    status.HTTP_502_BAD_GATEWAY,
+                    meta=external_response_data
+                    
+                )
 
             exchange_id = accounting_response.exchangeId
 
@@ -597,11 +672,28 @@ class ChecksService:
                 self._get_value(transfer_endpoint, "endpoint_name")
                 or "Accounting transfer"
             )
+            actor_id = self._get_actor_id(current_user)
+            endpoint_config = self.repo.get_accounting_consult_endpoint(
+                db,
+                payload.external_project_id,
+                payload.external_endpoint_id
+            )
 
+            queue_id = self.repo.create_accounting_queue(
+                db=db,
+                source_project_id=payload.external_project_id,
+                source_module_code=endpoint_config["endpoint_name"],
+                transaction_type=endpoint_config["endpoint_name"],
+                transaction_data=payload.normalized_json,
+                user_id=actor_id
+            )
+           
             transfer_id = self.repo.create_accounting_transfer(
                 db=db,
+                queue_id=str(queue_id),
                 external_project_id=payload.external_project_id,
-                transaction_type=str(endpoint_name),
+                external_endpoint_id= payload.external_endpoint_id,
+                transaction_type=endpoint_config["endpoint_name"],
                 payload_json=payload.normalized_json,
                 accounting_entry_id=exchange_id
             )
@@ -644,6 +736,241 @@ class ChecksService:
             )
 
             raise
+    def process_accounting_ack(
+        self,
+        db: Session,
+        payload: AccountingACKRequest,
+        ip: str = None,
+        user_agent: str = None,
+    ):
+        try:
+            # ── 1. Validaciones ────────────────────────────────────────────
+            if not payload.exchangeId or not payload.exchangeId.strip():
+                int_error("ACCOUNTING_ACK_EXCHANGE_ID_REQUIRED", status.HTTP_400_BAD_REQUEST)
+
+            if not payload.status or not payload.status.strip():
+                int_error("ACCOUNTING_ACK_STATUS_REQUIRED", status.HTTP_400_BAD_REQUEST)
+
+            # ── 2. Buscar lote ─────────────────────────────────────────────
+            transfer = self.repo.get_accounting_transfer_by_exchange_id(
+                db=db,
+                exchange_id=payload.exchangeId,
+            )
+
+            if transfer is None:
+                int_error("ACCOUNTING_ACK_TRANSFER_NOT_FOUND", status.HTTP_404_NOT_FOUND)
+
+            transfer_id  = str(transfer.transfer_id)
+            ack_status   = payload.status.upper()
+            has_failures = bool(payload.failedDocuments)
+            now          = datetime.utcnow()
+            ack_payload  = payload.dict()
+
+            # ── 3. Procesar resultado ──────────────────────────────────────
+            if ack_status == "PROCESSED" and not has_failures:
+                # ── 3a. Lote 100% exitoso ──────────────────────────────
+                transfer_status = "sent"
+
+                self.repo.update_accounting_transfer_ack(
+                    db=db,
+                    transfer_id=transfer_id,
+                    transfer_status=transfer_status,
+                    acknowledged_at=now,
+                    response_json=ack_payload,
+                )
+                self.repo.update_accounting_queue_status(
+                    db=db,
+                    transfer_id=transfer_id,
+                    queue_status=transfer_status,
+                    processed_at=now,                    # ← nuevo
+                )
+                self.repo.update_audit_receipts_status(
+                    db=db,
+                    accounting_transfer_id=transfer_id,
+                    status="sent",
+                )
+                outcome      = "success"
+                message_code = "ACCOUNTING_ACK_PROCESSED"
+
+            elif ack_status == "PARTIAL" or (ack_status == "PROCESSED" and has_failures):
+                # ── 3b. Lote PARTIAL ──────────────────────────────────
+                transfer_status = "partial"
+
+                self.repo.update_accounting_transfer_ack(
+                    db=db,
+                    transfer_id=transfer_id,
+                    transfer_status=transfer_status,
+                    acknowledged_at=now,
+                    response_json=ack_payload,
+                )
+                self.repo.update_accounting_queue_status(
+                    db=db,
+                    transfer_id=transfer_id,
+                    queue_status=transfer_status,
+                    processed_at=now,                    # ← nuevo
+                )
+
+                # Documentos exitosos → sent
+                for doc in (payload.processedDocuments or []):
+                    self.repo.update_audit_receipt_sent(
+                        db=db,
+                        accounting_transfer_id=transfer_id,
+                        document_id=doc.documentId,
+                    )
+
+                # Documentos fallidos → failed + error_log con fragmento completo del ACK
+                for failed_doc in (payload.failedDocuments or []):
+                    self.repo.update_audit_receipt_failed(
+                        db=db,
+                        accounting_transfer_id=transfer_id,
+                        document_id=failed_doc.documentId,
+                        failed_at=now,
+                        error_log={                          # fragmento exacto del ACK
+                            "documentId":       failed_doc.documentId,
+                            "documentType":     failed_doc.documentType,
+                            "status":           failed_doc.status,
+                            "accountingEntryId": failed_doc.accountingEntryId,
+                            "errorCode":        failed_doc.errorCode,
+                            "errorMessage":     failed_doc.errorMessage,
+                        },
+                    )
+
+                outcome      = "partial"
+                message_code = "ACCOUNTING_ACK_PARTIAL"
+
+            else:
+                # ── 3c. Lote FAILED ───────────────────────────────────
+                transfer_status = "failed"
+
+                self.repo.update_accounting_transfer_ack(
+                    db=db,
+                    transfer_id=transfer_id,
+                    transfer_status=transfer_status,
+                    acknowledged_at=now,
+                    response_json=ack_payload,
+                )
+                self.repo.update_accounting_queue_status(
+                    db=db,
+                    transfer_id=transfer_id,
+                    queue_status=transfer_status,
+                    processed_at=now,                    # ← nuevo
+                )
+
+                # Todos fallidos → failed + error_log con fragmento completo del ACK
+                for failed_doc in (payload.failedDocuments or []):
+                    self.repo.update_audit_receipt_failed(
+                        db=db,
+                        accounting_transfer_id=transfer_id,
+                        document_id=failed_doc.documentId,
+                        failed_at=now,
+                        error_log={                          # fragmento exacto del ACK
+                            "documentId":       failed_doc.documentId,
+                            "documentType":     failed_doc.documentType,
+                            "status":           failed_doc.status,
+                            "accountingEntryId": failed_doc.accountingEntryId,
+                            "errorCode":        failed_doc.errorCode,
+                            "errorMessage":     failed_doc.errorMessage,
+                        },
+                    )
+
+                outcome      = "failure"
+                message_code = "ACCOUNTING_ACK_FAILED"
+            db.commit()
+
+            # ── 4. Auditoría ───────────────────────────────────────────────
+            self._log_accounting_ack_audit(
+                db=db,
+                transfer=transfer,
+                exchange_id=payload.exchangeId,
+                outcome=outcome,
+                ip=ip,
+                user_agent=user_agent,
+            )
+
+            return AccountingACKResponse(
+                success=True,
+                message_code=message_code,
+                exchange_id=payload.exchangeId,
+            )
+
+        except Exception:
+            db.rollback()
+            self._log_accounting_ack_audit(
+                db=db,
+                transfer=None,
+                exchange_id=getattr(payload, "exchangeId", None),
+                outcome="failure",
+                ip=ip,
+                user_agent=user_agent,
+            )
+            raise
+    def update_audit_receipt_sent(
+        self,
+        db: Session,
+        accounting_transfer_id: str,
+        document_id: str,
+    ):
+        """
+        Marca como 'sent' el af_audit_receipt cuyo payload->>'documentId'
+        coincida con document_id. Se usa en lotes PARTIAL para los documentos
+        que sí fueron procesados exitosamente.
+        """
+        query = text("""
+            UPDATE public.af_audit_receipts
+            SET status = 'sent'
+            WHERE
+                accounting_transfer_id = CAST(:accounting_transfer_id AS uuid)
+                AND payload->>'documentId' = :document_id
+        """)
+
+        result = db.execute(query, {
+            "accounting_transfer_id": accounting_transfer_id,
+            "document_id": document_id,
+        })
+
+        print("==============================================")
+        print("af_audit_receipt MARCADO COMO SENT (PARCIAL)")
+        print("ACCOUNTING_TRANSFER_ID:", accounting_transfer_id)
+        print("DOCUMENT_ID:", document_id)
+        print("FILAS AFECTADAS:", result.rowcount)
+        print("==============================================")
+
+        
+    def _log_accounting_ack_audit(
+        self,
+        db: Session,
+        transfer,
+        exchange_id: str,
+        outcome: str,
+        ip: str = None,
+        user_agent: str = None,
+    ):
+        try:
+            project = self.audit_repo.get_project_by_code(db, code="AGROFUSION")
+
+            # El ACK es público, no hay usuario autenticado
+            # Se usa un actor_id neutro (None o un sistema)
+            self.audit_repo.log_event(
+                db=db,
+                action_code="ACCOUNTING_ACK",
+                outcome=outcome,
+                module_code="ACCOUNTING_VOUCHERS",
+                project_id=project.af_project_id,
+                actor_id=None,
+                ip=ip,
+                user_agent=user_agent,
+                metadata={
+                    "external_project": (
+                        str(transfer.source_project_id)
+                        if transfer is not None
+                        else None
+                    ),
+                    "ExchangeId": exchange_id,
+                },
+            )
+        except Exception as audit_ex:
+            # La auditoría nunca debe tumbar el flujo principal
+            print("ERROR REGISTRANDO AUDITORÍA ACK:", type(audit_ex).__name__, str(audit_ex))
 
     def _validate_accounting_period(
         self,
