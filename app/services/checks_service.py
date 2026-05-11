@@ -365,7 +365,6 @@ class ChecksService:
 
                 # #PRUEBAAA
                 result.metadata.SourceSystem.SystemNIT = "9001766666"
-                # result.metadata.GeneratedAt = datetime.now(timezone.utc).isoformat(timespec='microseconds')
 
             except Exception as ex:
                 print("RESPUESTA EXTERNA NO CUMPLE EL CONTRATO ESPERADO")
