@@ -4,8 +4,8 @@ app/scheduler/accounting_retry.py
 Job que corre cada minuto y gestiona reintentos de lotes contables sin ACK.
 
 FLUJO POR REINTENTO:
-  1. Busca transfers en 'processing' con sent_at > 30 min y retry_count < MAX_RETRIES
-  2. Obtiene el endpoint igual que transfer_accounting_batch (método + api key)
+  1. Busca transfers en 'processing' con sent_at > 30 min y retry_count < MAX_RETRIES → reenvía
+  2. Busca transfers en 'processing' con sent_at > 30 min y retry_count >= MAX_RETRIES → marca failed
   3. Si el envío es exitoso:
        - Incrementa af_accounting_transfers.retry_count
        - Crea un nuevo registro en af_accounting_queue
@@ -13,7 +13,7 @@ FLUJO POR REINTENTO:
        - Actualiza af_accounting_transfers.sent_at (reinicia el contador de 30 min)
   4. Si el envío falla o se agotaron los reintentos:
        - Marca af_accounting_transfers.transfer_status = 'failed'
-       - Marca TODAS las af_accounting_queue vinculadas como 'failed'
+       - Marca TODAS las af_accounting_queue del transfer como 'failed'
        - Marca todos los af_audit_receipts del transfer como 'failed'
 """
 
@@ -34,14 +34,10 @@ TIMEOUT_MINUTES = 30
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# RESOLUCIÓN DE ENDPOINT  (replica la lógica del service original)
+# RESOLUCIÓN DE ENDPOINT
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get_transfer_endpoint(db: Session, external_project_id: str) -> dict | None:
-    """
-    Misma query que checks_repository.get_accounting_transfer_endpoint.
-    Devuelve un dict con todas las columnas del endpoint, incluida 'url' ya armada.
-    """
     query = text("""
         SELECT
             endpoint.external_endpoint_id,
@@ -120,10 +116,6 @@ def _get_transfer_endpoint(db: Session, external_project_id: str) -> dict | None
 
 
 def _get_cat_term_value(db: Session, term_id: str) -> str | None:
-    """
-    Replica checks_repository.get_cat_term_value.
-    Detecta dinámicamente las columnas de cat_terms y devuelve el valor del método HTTP.
-    """
     columns = set(db.execute(text("""
         SELECT column_name
         FROM information_schema.columns
@@ -131,7 +123,7 @@ def _get_cat_term_value(db: Session, term_id: str) -> str | None:
           AND table_name   = 'cat_terms'
     """)).scalars().all())
 
-    id_column    = next((c for c in ["term_id", "cat_term_id", "id"]                                          if c in columns), None)
+    id_column    = next((c for c in ["term_id", "cat_term_id", "id"] if c in columns), None)
     value_column = next((c for c in ["code", "term_code", "value", "term_value", "name", "term_name", "description"] if c in columns), None)
 
     if not id_column or not value_column:
@@ -147,24 +139,16 @@ def _get_cat_term_value(db: Session, term_id: str) -> str | None:
 
 
 def _normalize_http_method(method_value: str | None) -> str:
-    """Replica checks_service._normalize_http_method. Devuelve POST si no resuelve."""
     if not method_value:
         return "POST"
-
     raw     = str(method_value).strip().upper()
     allowed = ["GET", "POST", "PUT", "PATCH", "DELETE"]
-
     if raw in allowed:
         return raw
-
     return next((m for m in allowed if m in raw), "POST")
 
 
 def _build_api_key_headers(response_template) -> dict:
-    """
-    Replica checks_service._build_accounting_transfer_api_key_headers.
-    No lanza excepción — el scheduler no debe caerse por falta de API key.
-    """
     if not response_template:
         print("[RETRY] Sin response_template — enviando sin API key.")
         return {}
@@ -180,26 +164,19 @@ def _build_api_key_headers(response_template) -> dict:
     if not isinstance(template, dict):
         return {}
 
-    # Caso 1: dict de headers directo
     headers = template.get("headers")
     if isinstance(headers, dict) and headers:
         return {str(k): str(v) for k, v in headers.items()}
 
-    # Caso 2: header_name + api_key sueltos
     header_name = (
-        template.get("header_name")
-        or template.get("header")
-        or template.get("key_name")
-        or template.get("name")
+        template.get("header_name") or template.get("header")
+        or template.get("key_name") or template.get("name")
         or "x-api-key"
     )
     api_key = (
-        template.get("api_key")
-        or template.get("apikey")
-        or template.get("apiKey")
-        or template.get("x-api-key")
-        or template.get("X-API-Key")
-        or template.get("value")
+        template.get("api_key") or template.get("apikey")
+        or template.get("apiKey") or template.get("x-api-key")
+        or template.get("X-API-Key") or template.get("value")
         or template.get("token")
     )
 
@@ -211,14 +188,13 @@ def _build_api_key_headers(response_template) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# QUERIES BD
+# QUERIES BD — DOS LISTAS SEPARADAS
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _get_transfers_to_retry(db: Session) -> list:
     """
-    Devuelve transfers en 'processing' con:
-      - sent_at hace más de TIMEOUT_MINUTES minutos
-      - retry_count < MAX_RETRIES
+    Transfers en 'processing' que aún tienen intentos disponibles.
+    sent_at > TIMEOUT_MINUTES Y retry_count < MAX_RETRIES
     """
     cutoff = datetime.utcnow() - timedelta(minutes=TIMEOUT_MINUTES)
 
@@ -227,8 +203,6 @@ def _get_transfers_to_retry(db: Session) -> list:
             t.transfer_id,
             t.queue_id,
             t.payload_json,
-            t.accounting_entry_id,
-            t.external_endpoint_id,
             t.retry_count,
             t.source_project_id,
             q.source_module_code,
@@ -240,6 +214,29 @@ def _get_transfers_to_retry(db: Session) -> list:
             t.transfer_status = 'processing'
             AND t.sent_at     < :cutoff
             AND COALESCE(t.retry_count, 0) < :max_retries
+    """), {"cutoff": cutoff, "max_retries": MAX_RETRIES}).fetchall()
+
+
+def _get_transfers_to_fail(db: Session) -> list:
+    """
+    Transfers en 'processing' que agotaron todos los reintentos.
+    sent_at > TIMEOUT_MINUTES Y retry_count >= MAX_RETRIES
+    Estos nunca serán detectados por _get_transfers_to_retry, por eso
+    se buscan aquí explícitamente para marcarlos como failed.
+    """
+    cutoff = datetime.utcnow() - timedelta(minutes=TIMEOUT_MINUTES)
+
+    return db.execute(text("""
+        SELECT
+            t.transfer_id,
+            t.queue_id,
+            t.retry_count,
+            t.source_project_id
+        FROM public.af_accounting_transfers t
+        WHERE
+            t.transfer_status = 'processing'
+            AND t.sent_at     < :cutoff
+            AND COALESCE(t.retry_count, 0) >= :max_retries
     """), {"cutoff": cutoff, "max_retries": MAX_RETRIES}).fetchall()
 
 
@@ -256,7 +253,6 @@ def _create_new_queue(
     user_id: str,
     retry_count: int,
 ) -> str:
-    """Crea un nuevo af_accounting_queue para el reintento y devuelve su queue_id."""
     transaction_data_text = json.dumps(
         transaction_data if isinstance(transaction_data, dict) else dict(transaction_data),
         ensure_ascii=False,
@@ -309,12 +305,15 @@ def _update_transfer_after_retry(db: Session, transfer_id: str, new_queue_id: st
 def _mark_all_failed(db: Session, transfer_id: str, queue_id: str, error: str):
     """
     Marca failed en las 3 tablas.
-    En af_accounting_queue marca tanto la queue pasada como
-    la que apunta actualmente el transfer (pueden diferir tras reintentos).
+    - af_accounting_transfers
+    - af_accounting_queue: marca la queue actual Y la que apunta el transfer
+      (pueden diferir si hubo reintentos previos exitosos)
+    - af_audit_receipts: solo los que aún están en 'processing'
     """
     now             = datetime.utcnow()
     error_truncated = error[:1000]
 
+    # ── af_accounting_transfers ───────────────────────────────────────────
     db.execute(text("""
         UPDATE public.af_accounting_transfers
         SET transfer_status = 'failed',
@@ -330,11 +329,15 @@ def _mark_all_failed(db: Session, transfer_id: str, queue_id: str, error: str):
             processed_at = :now
         WHERE queue_id IN (
             CAST(:queue_id AS uuid),
-            (SELECT queue_id FROM public.af_accounting_transfers
-             WHERE transfer_id = CAST(:transfer_id AS uuid))
+            (
+                SELECT queue_id
+                FROM public.af_accounting_transfers
+                WHERE transfer_id = CAST(:transfer_id AS uuid)
+            )
         )
     """), {"error": error_truncated, "queue_id": queue_id, "now": now, "transfer_id": transfer_id})
 
+    # ── af_audit_receipts ─────────────────────────────────────────────────
     db.execute(text("""
         UPDATE public.af_audit_receipts
         SET status    = 'failed',
@@ -355,25 +358,21 @@ def _log_retry_audit(
     db: Session,
     transfer_id: str,
     project_id: str,
-    outcome: str,       # "success" | "failure"
+    outcome: str,
     retry_number: int,
     actor_id=None,
 ):
-    """
-    Registra un evento de auditoría por cada intento de reenvío del scheduler.
-
-    action_code : SENT_RETRY_ACCOUNTING_TRANSFER
-    outcome     : success / failure
-    metadata    : transfer_id, project_id, retry_number
-    """
     try:
         project = _audit_repo.get_project_by_code(db, code="AGROFUSION")
 
         if project is None:
-            print("[RETRY AUDIT] No se encontró proyecto AGROFUSION para auditoría.")
+            print("[RETRY AUDIT] No se encontró proyecto AGROFUSION.")
             return
 
-        project_audit_id = getattr(project, "af_project_id", None) or getattr(project, "project_id", None)
+        project_audit_id = (
+            getattr(project, "af_project_id", None)
+            or getattr(project, "project_id", None)
+        )
 
         _audit_repo.log_event(
             db=db,
@@ -385,20 +384,19 @@ def _log_retry_audit(
             ip=None,
             user_agent="scheduler/accounting_retry",
             metadata={
-                "transfer_id":    transfer_id,
-                "project_id":     project_id,
-                "retry_number":   retry_number,
+                "transfer_id":  transfer_id,
+                "project_id":   project_id,
+                "retry_number": retry_number,
             },
         )
 
         print(
-            f"[RETRY AUDIT] Auditoría registrada — "
+            f"[RETRY AUDIT] Registrada — "
             f"transfer={transfer_id} outcome={outcome} retry_number={retry_number}"
         )
 
     except Exception as ex:
-        # La auditoría nunca debe tumbar el flujo principal
-        print(f"[RETRY AUDIT] ERROR registrando auditoría: {type(ex).__name__} — {str(ex)}")
+        print(f"[RETRY AUDIT] ERROR: {type(ex).__name__} — {str(ex)}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -409,24 +407,55 @@ def retry_pending_accounting_transfers():
     """
     Job ejecutado por APScheduler cada minuto.
 
-    Por cada transfer sin ACK pasados TIMEOUT_MINUTES:
-      - retry_count >= MAX_RETRIES  →  marca failed en las 3 tablas
-      - Quedan intentos             →  reenvía con método HTTP + API key correctos
-          OK  → nueva queue, actualiza transfer (queue_id, retry_count, sent_at)
-          ERR → si era el último intento marca failed; si no, espera próximo ciclo
+    Paso 1: Marca como failed los transfers que agotaron MAX_RETRIES.
+    Paso 2: Reenvía los transfers que aún tienen intentos disponibles.
     """
     print(f"[RETRY JOB] Revisando @ {datetime.utcnow().isoformat()}")
 
     db: Session = SessionLocal()
 
     try:
-        pending = _get_transfers_pending_retry(db)
+
+        # ══════════════════════════════════════════════════════════════════
+        # PASO 1 — Marcar failed los que agotaron reintentos
+        # ══════════════════════════════════════════════════════════════════
+        exhausted = _get_transfers_to_fail(db)
+
+        if exhausted:
+            print(f"[RETRY JOB] Transfers a marcar FAILED: {len(exhausted)}")
+
+        for row in exhausted:
+            transfer_id = str(row.transfer_id)
+            queue_id    = str(row.queue_id)
+            project_id  = str(row.source_project_id)
+            retry_count = int(row.retry_count or 0)
+
+            error_msg = (
+                f"Sin ACK después de {retry_count} reintentos "
+                f"({retry_count * TIMEOUT_MINUTES} min totales)."
+            )
+            print(f"[RETRY JOB] Transfer {transfer_id} agotó reintentos → FAILED")
+
+            _mark_all_failed(db, transfer_id, queue_id, error_msg)
+            _log_retry_audit(
+                db=db,
+                transfer_id=transfer_id,
+                project_id=project_id,
+                outcome="failure",
+                retry_number=retry_count,
+            )
+            db.commit()
+
+        # ══════════════════════════════════════════════════════════════════
+        # PASO 2 — Reintentar los que aún tienen intentos disponibles
+        # ══════════════════════════════════════════════════════════════════
+        pending = _get_transfers_to_retry(db)
 
         if not pending:
-            print("[RETRY JOB] Sin transfers pendientes.")
+            print("[RETRY JOB] Sin transfers pendientes de reintento.")
             return
 
-        print(f"[RETRY JOB] Transfers a procesar: {len(pending)}")
+        print(f"[RETRY JOB] Transfers a reintentar: {len(pending)}")
 
         for row in pending:
             transfer_id        = str(row.transfer_id)
@@ -441,31 +470,12 @@ def retry_pending_accounting_transfers():
 
             print(f"\n[RETRY JOB] Transfer {transfer_id} — retry {retry_count}/{MAX_RETRIES}")
 
-            # ── ¿Reintentos agotados? ─────────────────────────────────────
-            if retry_count >= MAX_RETRIES:
-                error_msg = (
-                    f"Sin ACK después de {MAX_RETRIES} reintentos "
-                    f"({MAX_RETRIES * TIMEOUT_MINUTES} min totales)."
-                )
-                print(f"[RETRY JOB] {error_msg}")
-                _mark_all_failed(db, transfer_id, queue_id, error_msg)
-                _log_retry_audit(
-                    db=db,
-                    transfer_id=transfer_id,
-                    project_id=project_id,
-                    outcome="failure",
-                    retry_number=retry_count,
-                )
-                db.commit()
-                continue
-
             # ── Validar user_id ───────────────────────────────────────────
             if not user_id or user_id == "None":
                 print(f"[RETRY JOB] user_id inválido — transfer {transfer_id}, saltando.")
                 db.commit()
                 continue
 
-            # ── Obtener endpoint ──────────────────────────────────────────
             # ── Obtener endpoint ──────────────────────────────────────────
             endpoint = _get_transfer_endpoint(db, project_id)
             if not endpoint:
@@ -482,7 +492,7 @@ def retry_pending_accounting_transfers():
                 db.commit()
                 continue
 
-            # ── Método HTTP (via cat_terms) ────────────────────────────────
+            # ── Método HTTP ───────────────────────────────────────────────
             method_term_id = endpoint.get("method_term_id")
             method_value   = _get_cat_term_value(db, str(method_term_id)) if method_term_id else None
             http_method    = _normalize_http_method(method_value)
@@ -526,10 +536,9 @@ def retry_pending_accounting_transfers():
                 )
 
                 if response.status_code == 409:
-                    # Contabilidad ya tiene el lote — tratar como envío exitoso
                     is_duplicate = True
                     send_ok      = True
-                    print(f"[RETRY JOB] 409 Lote duplicado — contabilidad ya lo tiene. Transfer {transfer_id}")
+                    print(f"[RETRY JOB] 409 Duplicado — contabilidad ya lo tiene. Transfer {transfer_id}")
 
                 elif response.status_code < 200 or response.status_code >= 300:
                     raise Exception(f"HTTP {response.status_code}: {response.text[:300]}")
@@ -571,17 +580,16 @@ def retry_pending_accounting_transfers():
                     retry_number=next_retry,
                 )
                 if is_duplicate:
-                    print(f"[RETRY JOB] Transfer {transfer_id} marcado como reintentado (409 duplicado).")
+                    print(f"[RETRY JOB] Transfer {transfer_id} reintentado (409 duplicado).")
                 else:
                     print(f"[RETRY JOB] retry_count={next_retry}, nueva queue={new_queue_id}")
+
             else:
-                if next_retry >= MAX_RETRIES:
-                    _mark_all_failed(db, transfer_id, queue_id, send_error)
-                else:
-                    print(
-                        f"[RETRY JOB] Fallo reintento #{next_retry}. "
-                        f"Quedan {MAX_RETRIES - next_retry} intento(s)."
-                    )
+                # Envío falló — quedan intentos, espera el próximo ciclo
+                print(
+                    f"[RETRY JOB] Fallo reintento #{next_retry}. "
+                    f"Quedan {MAX_RETRIES - next_retry} intento(s)."
+                )
                 _log_retry_audit(
                     db=db,
                     transfer_id=transfer_id,
