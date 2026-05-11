@@ -682,7 +682,7 @@ class ChecksRepository:
                 :accounting_entry_id,
                 NULL,
                 NULL,
-                1,
+                0,
                 CAST(:external_endpoint_id AS uuid)
             )
             RETURNING transfer_id
@@ -997,11 +997,6 @@ class ChecksRepository:
             else None
         )
 
-        # error_message solo en failed; en partial queda NULL
-        if transfer_status == "failed":
-            error_message_text = response_json_text          # copia del ACK
-        else:
-            error_message_text = None                        # partial → NULL
 
         query = text("""
             UPDATE public.af_accounting_transfers

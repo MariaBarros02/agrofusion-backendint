@@ -214,7 +214,7 @@ def _build_api_key_headers(response_template) -> dict:
 # QUERIES BD
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _get_transfers_pending_retry(db: Session) -> list:
+def _get_transfers_to_retry(db: Session) -> list:
     """
     Devuelve transfers en 'processing' con:
       - sent_at hace más de TIMEOUT_MINUTES minutos
@@ -322,6 +322,7 @@ def _mark_all_failed(db: Session, transfer_id: str, queue_id: str, error: str):
         WHERE transfer_id = CAST(:transfer_id AS uuid)
     """), {"error": error_truncated, "transfer_id": transfer_id})
 
+    # ── af_accounting_queue — queue actual + queue que apunta el transfer ─
     db.execute(text("""
         UPDATE public.af_accounting_queue
         SET status       = 'failed',
@@ -464,6 +465,7 @@ def retry_pending_accounting_transfers():
                 db.commit()
                 continue
 
+            # ── Obtener endpoint ──────────────────────────────────────────
             # ── Obtener endpoint ──────────────────────────────────────────
             endpoint = _get_transfer_endpoint(db, project_id)
             if not endpoint:
