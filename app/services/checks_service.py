@@ -364,7 +364,7 @@ class ChecksService:
                 result.metadata.ExchangeId = "-".join(parts)
 
                 # #PRUEBAAA
-                # result.metadata.SourceSystem.SystemNIT = "9001766666"
+                result.metadata.SourceSystem.SystemNIT = "9001766666"
                 # result.metadata.GeneratedAt = datetime.now(timezone.utc).isoformat(timespec='microseconds')
 
             except Exception as ex:
