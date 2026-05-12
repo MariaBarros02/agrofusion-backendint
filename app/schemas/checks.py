@@ -1,8 +1,7 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -672,3 +671,99 @@ class AccountingACKResponse(BaseModel):
     success: bool
     message_code: str
     exchange_id: str
+
+
+
+# ── Consulta de refresh ─────────────────────────────────────────────────────
+
+class CheckRefreshRequest(BaseModel):
+    """
+    Body del endpoint POST /checks/{transfer_id}/refresh
+    Solo necesita el transfer_id (viene en la URL), pero se define
+    el schema por si en el futuro se requieren parámetros adicionales.
+    No se necesita pasar nada: el periodo y el endpoint se leen del registro.
+    """
+    pass  # transfer_id viene en path; todo lo demás se obtiene de BD
+
+
+# ── Elementos con indicación de cambio ─────────────────────────────────────
+
+class InvoiceDiff(BaseModel):
+    change_type: Literal["created", "modified", "deleted"] = Field(
+        ...,
+        description="Indica si la factura fue creada, modificada o eliminada",
+        example="modified"
+    )
+    previous: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Versión anterior de la factura (None si es nueva)"
+    )
+    current: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Versión actual de la factura (None si fue eliminada)"
+    )
+
+
+class TransactionDiff(BaseModel):
+    change_type: Literal["created", "modified", "deleted"] = Field(
+        ...,
+        description="Indica si la transacción fue creada, modificada o eliminada",
+        example="created"
+    )
+    previous: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Versión anterior de la transacción (None si es nueva)"
+    )
+    current: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Versión actual de la transacción (None si fue eliminada)"
+    )
+
+
+# ── Respuesta del diff ──────────────────────────────────────────────────────
+
+class CheckRefreshResponse(BaseModel):
+    """
+    Respuesta del endpoint de refresh/diff de comprobante.
+    """
+    has_changes: bool = Field(
+        ...,
+        description="Indica si existen diferencias entre el payload original y la nueva consulta",
+        example=True
+    )
+
+    # metadata y summary completos de AMBAS versiones
+    previous_metadata: Dict[str, Any] = Field(
+        ...,
+        description="Metadata del payload original almacenado en BD"
+    )
+    current_metadata: Dict[str, Any] = Field(
+        ...,
+        description="Metadata de la nueva consulta al endpoint externo"
+    )
+    previous_summary: Dict[str, Any] = Field(
+        ...,
+        description="Summary del payload original almacenado en BD"
+    )
+    current_summary: Dict[str, Any] = Field(
+        ...,
+        description="Summary de la nueva consulta al endpoint externo"
+    )
+
+    # Solo las facturas/transacciones que cambiaron
+    invoice_diffs: List[InvoiceDiff] = Field(
+        default_factory=list,
+        description=(
+            "Facturas que fueron creadas, modificadas o eliminadas. "
+            "Las facturas sin cambios NO se incluyen."
+        )
+    )
+    transaction_diffs: List[TransactionDiff] = Field(
+        default_factory=list,
+        description=(
+            "Transacciones que fueron creadas, modificadas o eliminadas. "
+            "Las transacciones sin cambios NO se incluyen."
+        )
+    )
+
+

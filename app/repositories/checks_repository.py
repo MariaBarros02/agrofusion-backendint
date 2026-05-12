@@ -1150,3 +1150,88 @@ class ChecksRepository:
         print("ERROR_LOG:",             error_log_text)
         print("FILAS AFECTADAS:",       result.rowcount)
         print("==============================================")
+
+
+    def get_transfer_for_refresh(
+        self,
+        db: Session,
+        transfer_id: str,
+    ):
+        """
+        Obtiene los datos necesarios para re-consultar el endpoint externo
+        de un comprobante:
+          - af_accounting_transfers.external_endpoint_id
+          - af_accounting_transfers.source_project_id
+          - af_accounting_transfers.payload_json  (para extraer el periodo)
+          - af_external_endpoint + af_external_url para armar la URL completa
+
+        Retorna un mapping con:
+            transfer_id, external_endpoint_id, source_project_id,
+            payload_json, url, is_protected,
+            authorization_type, authorization_value
+        """
+
+        query = text("""
+            SELECT
+                t.transfer_id,
+                t.external_endpoint_id,
+                t.source_project_id,
+                t.payload_json,
+
+                CASE
+                    WHEN endpoint.external_url_id IS NULL
+                         AND (
+                             LOWER(endpoint.path) LIKE 'http://%%'
+                             OR LOWER(endpoint.path) LIKE 'https://%%'
+                         )
+                    THEN endpoint.path
+
+                    WHEN external_url.external_url_id IS NOT NULL
+                    THEN CONCAT(
+                        RTRIM(external_url.client_url, '/'),
+                        RTRIM(COALESCE(external_url.base_url, ''), '/'),
+                        '/',
+                        LTRIM(endpoint.path, '/')
+                    )
+
+                    ELSE endpoint.path
+                END AS url,
+
+                endpoint.is_protected,
+                NULL AS authorization_type,
+                NULL AS authorization_value
+
+            FROM public.af_accounting_transfers t
+            INNER JOIN public.af_external_endpoint endpoint
+                ON endpoint.external_endpoint_id = t.external_endpoint_id
+            LEFT JOIN public.af_external_url external_url
+                ON external_url.external_url_id = endpoint.external_url_id
+
+            WHERE t.transfer_id = CAST(:transfer_id AS uuid)
+              AND endpoint.is_active = TRUE
+              AND endpoint.deleted_at IS NULL
+            LIMIT 1
+        """)
+
+        row = (
+            db.execute(query, {"transfer_id": transfer_id})
+            .mappings()
+            .first()
+        )
+
+        if row:
+            print("==============================================")
+            print("TRANSFER FOR REFRESH ENCONTRADO")
+            print("TRANSFER_ID:", row.get("transfer_id"))
+            print("EXTERNAL_ENDPOINT_ID:", row.get("external_endpoint_id"))
+            print("SOURCE_PROJECT_ID:", row.get("source_project_id"))
+            print("URL:", row.get("url"))
+            print("IS_PROTECTED:", row.get("is_protected"))
+            print("==============================================")
+        else:
+            print("==============================================")
+            print("TRANSFER FOR REFRESH NO ENCONTRADO")
+            print("TRANSFER_ID:", transfer_id)
+            print("==============================================")
+
+        return row

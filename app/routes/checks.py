@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.dependences.auth import get_current_user
 from app.schemas.checks import (
     CheckDetailResponse,
+    CheckRefreshResponse,
     ListChecksRequest,
     PaginatedChecksResponse,
     CheckTypeListResponse,
@@ -765,5 +766,38 @@ def accounting_ack(
         ip=ip,
         user_agent=user_agent,
     )
+
+
+@router.get(
+    "/{transfer_id}/refresh",
+    response_model=CheckRefreshResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Re-consultar comprobante y obtener diferencias",
+    description=(
+        "Toma el endpoint externo y el periodo registrados en el comprobante, "
+        "vuelve a consultarlos y retorna el diff entre el payload almacenado "
+        "y la nueva respuesta. Solo incluye facturas y transacciones que hayan "
+        "sido creadas, modificadas o eliminadas."
+    ),
+)
+def refresh_check_diff(
+    transfer_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    service = ChecksService()
+
+    ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+ 
+    return service.refresh_check_diff(
+        db=db,
+        transfer_id=transfer_id,
+        current_user=current_user,
+        ip=ip,
+        user_agent=user_agent,
+    )
+ 
 
 router.include_router(vouchers_router)

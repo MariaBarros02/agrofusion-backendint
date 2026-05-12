@@ -26,7 +26,12 @@ from app.schemas.checks import (
     AccountingTransferRequest,
     AccountingTransferResponse,
     AccountingTransferAccountingResponse,
+    CheckRefreshResponse,
+    InvoiceDiff,
+    TransactionDiff
 )
+
+
 from app.services.permissions_service import PermissionsService
 
 
@@ -1567,3 +1572,311 @@ class ChecksService:
                 pass
 
         return None
+    
+
+# ============================================================
+# Reemplaza refresh_check_diff y _diff_documents en ChecksService
+# ============================================================
+
+    def refresh_check_diff(
+        self,
+        db: Session,
+        transfer_id: str,
+        current_user: dict,
+        ip: str = None,
+        user_agent: str = None,
+    ) -> "CheckRefreshResponse":
+
+        # ── 1. Permiso 046 ──────────────────────────────────────────────
+        if not self.perm_service.validate_permission(
+            db,
+            current_user.get("role"),
+            "046"
+        ):
+            int_error("AUTH_INSUFFICIENT_PERMISSIONS", status.HTTP_403_FORBIDDEN)
+
+        # ── 2. Obtener datos del transfer + endpoint de BD ───────────────
+        transfer_row = self.repo.get_transfer_for_refresh(db, transfer_id)
+
+        if transfer_row is None:
+            int_error("CHECK_NOT_FOUND", status.HTTP_404_NOT_FOUND)
+
+        raw_payload = self._get_value(transfer_row, "payload_json")
+
+        if not raw_payload:
+            int_error("CHECK_PAYLOAD_JSON_MISSING", status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+        # ── CRÍTICO: normalizar payload_json a dict si viene como string ─
+        payload_json = self._parse_json_field(raw_payload)
+
+        print("==============================================")
+        print("REFRESH — TIPO payload_json:", type(payload_json))
+        print("REFRESH — KEYS payload_json:", list(payload_json.keys()) if isinstance(payload_json, dict) else "NO ES DICT")
+        print("==============================================")
+
+        if not isinstance(payload_json, dict):
+            int_error("CHECK_PAYLOAD_JSON_INVALID", status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+        # ── 3. Extraer periodo ──────────────────────────────────────────
+        try:
+            metadata_stored = payload_json.get("metadata") or {}
+            requested_period = metadata_stored.get("RequestedPeriod") or {}
+            since_period = requested_period.get("From", "").strip()
+            until_period = requested_period.get("To", "").strip()
+        except Exception:
+            int_error("CHECK_PERIOD_EXTRACTION_FAILED", status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+        if not since_period or not until_period:
+            int_error("CHECK_PERIOD_MISSING", status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+        # ── 4. Armar URL y cabeceras ────────────────────────────────────
+        url_template = self._get_value(transfer_row, "url")
+
+        if not url_template:
+            int_error("EXTERNAL_ENDPOINT_URL_EMPTY", status.HTTP_400_BAD_REQUEST)
+
+        url = self._build_accounting_consult_url(
+            str(url_template),
+            since_period,
+            until_period
+        )
+
+        headers = self._build_external_endpoint_headers(transfer_row)
+
+        is_protected = self._is_truthy(
+            self._get_value(transfer_row, "is_protected")
+        )
+
+        if is_protected:
+            class _MinimalConsultPayload:
+                def __init__(self, project_id, endpoint_id):
+                    self.external_project_id = project_id
+                    self.external_endpoint_id = endpoint_id
+
+            source_project_id    = str(self._get_value(transfer_row, "source_project_id"))
+            external_endpoint_id = str(self._get_value(transfer_row, "external_endpoint_id"))
+
+            external_token = self._request_external_service_token(
+                db=db,
+                payload=_MinimalConsultPayload(source_project_id, external_endpoint_id),
+                current_user=current_user
+            )
+            headers["Authorization"] = f"Bearer {external_token}"
+
+        safe_headers = dict(headers)
+        if "Authorization" in safe_headers:
+            safe_headers["Authorization"] = "Bearer ***"
+
+        print("==============================================")
+        print("REFRESH CHECK DIFF — LLAMADA EXTERNA")
+        print("TRANSFER_ID:", transfer_id)
+        print("URL:", url)
+        print("IS_PROTECTED:", is_protected)
+        print("HEADERS:", safe_headers)
+        print("==============================================")
+
+        # ── 5. Llamada al endpoint externo ──────────────────────────────
+        response = None
+        try:
+            response = httpx.get(url, headers=headers, timeout=60.0, trust_env=False)
+        except httpx.TimeoutException as ex:
+            print("TIMEOUT REFRESH ENDPOINT:", type(ex).__name__, str(ex))
+            int_error("EXT_ACCOUNTING_INFO", status.HTTP_502_BAD_GATEWAY)
+        except httpx.RequestError as ex:
+            print("ERROR REFRESH ENDPOINT:", type(ex).__name__, str(ex))
+            int_error("EXT_ACCOUNTING_INFO", status.HTTP_502_BAD_GATEWAY)
+        except Exception as ex:
+            print("ERROR NO CONTROLADO REFRESH ENDPOINT:", type(ex).__name__, str(ex))
+            int_error("EXT_ACCOUNTING_INFO", status.HTTP_502_BAD_GATEWAY)
+
+        if response.status_code < 200 or response.status_code >= 300:
+            print("REFRESH ENDPOINT RESPONDIÓ ERROR:", response.status_code, response.text)
+            int_error("EXT_ACCOUNTING_INFO", status.HTTP_502_BAD_GATEWAY)
+
+        try:
+            fresh_data = response.json()
+        except ValueError:
+            print("REFRESH ENDPOINT NO DEVOLVIÓ JSON VÁLIDO:", response.text)
+            int_error("EXT_ACCOUNTING_INFO", status.HTTP_502_BAD_GATEWAY)
+
+        # ── 6. Construir diff ───────────────────────────────────────────
+        old_metadata  = payload_json.get("metadata")     or {}
+        new_metadata  = fresh_data.get("metadata")       or {}
+        old_summary   = payload_json.get("summary")      or {}
+        new_summary   = fresh_data.get("summary")        or {}
+        old_invoices  = payload_json.get("invoices")     or []
+        new_invoices  = fresh_data.get("invoices")       or []
+        old_txs       = payload_json.get("transactions") or []
+        new_txs       = fresh_data.get("transactions")   or []
+
+        print("==============================================")
+        print("REFRESH — old_invoices count:", len(old_invoices))
+        print("REFRESH — new_invoices count:", len(new_invoices))
+        print("REFRESH — old_txs count:", len(old_txs))
+        print("REFRESH — new_txs count:", len(new_txs))
+        print("==============================================")
+        # ── Normalizar campos volátiles del metadata ────────────────────
+        # ExchangeId y GeneratedAt cambian en cada consulta al endpoint
+        # externo y no representan cambios de negocio, por eso se igualan
+        # al valor almacenado en BD antes de comparar.
+        METADATA_VOLATILE_FIELDS = ("ExchangeId", "GeneratedAt",  "SourceSystem")
+ 
+        new_metadata_normalized = {**new_metadata}
+        for field in METADATA_VOLATILE_FIELDS:
+            if field in old_metadata:
+                new_metadata_normalized[field] = old_metadata[field]
+ 
+
+        invoice_diffs     = self._diff_documents(old_invoices, new_invoices, "DocumentId")
+        transaction_diffs = self._diff_documents(old_txs,      new_txs,      "DocumentId")
+
+        has_changes = (
+            self._canonical(old_metadata) != self._canonical(new_metadata_normalized)
+            or self._canonical(old_summary) != self._canonical(new_summary)
+            or bool(invoice_diffs)
+            or bool(transaction_diffs)
+        )
+
+        print("==============================================")
+        print("REFRESH CHECK DIFF — RESULTADO")
+        print("TRANSFER_ID:", transfer_id)
+        print("HAS_CHANGES:", has_changes)
+        print("INVOICE_DIFFS:", len(invoice_diffs))
+        print("TRANSACTION_DIFFS:", len(transaction_diffs))
+        print("==============================================")
+
+        return CheckRefreshResponse(
+            has_changes=has_changes,
+            previous_metadata=old_metadata,
+            current_metadata=new_metadata_normalized,
+            previous_summary=old_summary,
+            current_summary=new_summary,
+            invoice_diffs=[InvoiceDiff(**d) for d in invoice_diffs],
+            transaction_diffs=[TransactionDiff(**d) for d in transaction_diffs],
+        )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Helpers privados
+    # ──────────────────────────────────────────────────────────────────
+
+    def _parse_json_field(self, value) -> dict:
+        """
+        Garantiza que un campo JSONB de SQLAlchemy siempre sea dict.
+        PostgreSQL/SQLAlchemy a veces entrega JSONB como str, otras como dict.
+        """
+        if isinstance(value, dict):
+            return value
+
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (ValueError, TypeError):
+                pass
+
+        return {}
+# ============================================================
+# Solo reemplaza el método _normalize_for_compare en ChecksService
+# ============================================================
+
+    def _normalize_for_compare(self, obj):
+        """
+        Normaliza recursivamente cualquier objeto para comparación canónica.
+
+        Casos que maneja:
+        - str que parece JSON  → parsea primero
+        - dict                 → ordena claves en TODOS los niveles
+        - list                 → normaliza cada elemento (mantiene orden)
+        - float sin decimales  → convierte a int  (120000.0 == 120000)
+        - escalar              → devuelve tal cual
+        """
+        if isinstance(obj, str):
+            try:
+                obj = json.loads(obj)
+            except (ValueError, TypeError):
+                return obj
+
+        if isinstance(obj, dict):
+            return {k: self._normalize_for_compare(v) for k, v in sorted(obj.items())}
+
+        if isinstance(obj, list):
+            return [self._normalize_for_compare(i) for i in obj]
+
+        # ── CLAVE: igualar 120000.0 y 120000 ──────────────────────────
+        if isinstance(obj, float) and obj == int(obj):
+            return int(obj)
+
+        return obj
+
+    def _canonical(self, obj) -> str:
+        """Convierte un objeto a string canónico para comparación."""
+        return json.dumps(self._normalize_for_compare(obj), ensure_ascii=False)
+
+    def _diff_documents(
+        self,
+        old_list: list,
+        new_list: list,
+        id_key: str = "DocumentId",
+    ) -> list:
+        """
+        Compara dos listas de documentos por su ID y devuelve solo
+        los que fueron creados, modificados o eliminados.
+
+        Busca el ID en:
+          1. item[id_key]           → transacciones
+          2. item["Header"][id_key] → facturas
+          3. fallback posicional
+        """
+
+        def extract_id(item: dict, idx: int) -> str:
+            val = item.get(id_key)
+            if val:
+                return str(val)
+            header = item.get("Header")
+            if isinstance(header, dict):
+                val = header.get(id_key)
+                if val:
+                    return str(val)
+            print(f"[_diff_documents] WARNING: '{id_key}' no encontrado en índice {idx}, usando fallback")
+            return f"__idx_{idx}__"
+
+        old_map = {extract_id(item, idx): item for idx, item in enumerate(old_list)}
+        new_map = {extract_id(item, idx): item for idx, item in enumerate(new_list)}
+
+        print("==============================================")
+        print("_diff_documents — old_map keys:", list(old_map.keys()))
+        print("_diff_documents — new_map keys:", list(new_map.keys()))
+        print("==============================================")
+
+        all_keys = set(old_map.keys()) | set(new_map.keys())
+        diffs = []
+
+        for key in all_keys:
+            in_old = key in old_map
+            in_new = key in new_map
+
+            if in_old and not in_new:
+                diffs.append({"change_type": "deleted", "previous": old_map[key], "current": None})
+
+            elif not in_old and in_new:
+                diffs.append({"change_type": "created", "previous": None, "current": new_map[key]})
+
+            else:
+                old_canon = self._canonical(old_map[key])
+                new_canon = self._canonical(new_map[key])
+
+                print(f"  [{key}] old_canon == new_canon: {old_canon == new_canon}")
+                # TEMPORAL - BORRAR DESPUÉS
+                print(f"  [{key}] IGUAL: {old_canon == new_canon}")
+                print(f"  OLD: {old_canon}")
+                print(f"  NEW: {new_canon}")
+                if old_canon != new_canon:
+                    diffs.append({"change_type": "modified", "previous": old_map[key], "current": new_map[key]})
+
+        return diffs
+
+
+
+
+
