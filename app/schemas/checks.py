@@ -750,6 +750,22 @@ class CheckRefreshResponse(BaseModel):
         description="Summary de la nueva consulta al endpoint externo"
     )
 
+    # Estado completo actual (todas las facturas/transacciones vigentes)
+    current_invoices: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Lista completa de facturas en su estado actual (incluye las no modificadas). "
+            "Se usa para reconstruir el payload_json completo al aplicar la actualización."
+        )
+    )
+    current_transactions: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Lista completa de transacciones en su estado actual (incluye las no modificadas). "
+            "Se usa para reconstruir el payload_json completo al aplicar la actualización."
+        )
+    )
+
     # Solo las facturas/transacciones que cambiaron
     invoice_diffs: List[InvoiceDiff] = Field(
         default_factory=list,
@@ -767,3 +783,57 @@ class CheckRefreshResponse(BaseModel):
     )
 
 
+
+ 
+class AccountingUpdateRequest(BaseModel):
+    """
+    Body del endpoint POST /checks/{transfer_id}/update-accounting
+    Recibe el diff generado por el endpoint de comparación.
+    """
+    diff: Dict[str, Any] = Field(
+        ...,
+        description="Objeto diff retornado por el endpoint de comparación (CheckRefreshResponse)",
+        example={
+            "has_changes": True,
+            "previous_metadata": {},
+            "current_metadata": {},
+            "previous_summary": {},
+            "current_summary": {},
+            "invoice_diffs": [],
+            "transaction_diffs": []
+        }
+    )
+ 
+ 
+class AccountingUpdateResponse(BaseModel):
+    """
+    Respuesta del endpoint de actualización contable.
+    """
+    success: bool = Field(
+        ...,
+        description="Indica si la actualización fue enviada exitosamente",
+        example=True
+    )
+    message_code: str = Field(
+        ...,
+        description="Código internacionalizable para mostrar en frontend",
+        example="ACCOUNTING_UPDATE_SENT"
+    )
+    transfer_id: str = Field(
+        ...,
+        description="Identificador del comprobante actualizado (mismo transfer_id de entrada)",
+        example="90640c8a-2bd8-40fc-b652-e68b960a19e0"
+    )
+    new_exchange_id: str = Field(
+        ...,
+        description="ExchangeId UPD generado y enviado a contabilidad",
+        example="AF-UPD-2026-05-5261922"
+    )
+    accounting_response: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Respuesta recibida desde contabilidad"
+    )
+    sent_payload: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Payload AgroFusionExchangeUpdate enviado a contabilidad"
+    )

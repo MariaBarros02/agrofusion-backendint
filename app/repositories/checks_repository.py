@@ -1235,3 +1235,145 @@ class ChecksRepository:
             print("==============================================")
 
         return row
+    
+
+# ── MÉTODO 1: Obtener el transfer completo por transfer_id ──────────────────
+ 
+    def get_transfer_full_by_id(
+        self,
+        db: Session,
+        transfer_id: str,
+    ):
+        """
+        Obtiene todos los datos necesarios del transfer para construir
+        el payload de actualización y hacer el envío a contabilidad:
+          - payload_json            (para leer metadata, summary, invoices, transactions originales)
+          - source_project_id       (para obtener el endpoint de transferencia)
+          - external_endpoint_id    (para obtener config de consulta)
+          - transaction_type        (para registrar la nueva queue)
+          - accounting_entry_id     (ExchangeId original)
+ 
+        Reutiliza get_accounting_transfer_endpoint internamente desde el servicio.
+        """
+ 
+        query = text("""
+            SELECT
+                t.transfer_id,
+                t.source_project_id,
+                t.external_endpoint_id,
+                t.transaction_type,
+                t.payload_json,
+                t.accounting_entry_id,
+                t.transfer_status,
+                ep.endpoint_name
+            FROM public.af_accounting_transfers t
+            INNER JOIN public.af_external_endpoint ep
+                ON ep.external_endpoint_id = t.external_endpoint_id
+            WHERE t.transfer_id = CAST(:transfer_id AS uuid)
+            LIMIT 1
+        """)
+ 
+        row = (
+            db.execute(query, {"transfer_id": transfer_id})
+            .mappings()
+            .first()
+        )
+ 
+        print("==============================================")
+        if row:
+            print("TRANSFER FULL ENCONTRADO")
+            print("TRANSFER_ID:", row.get("transfer_id"))
+            print("SOURCE_PROJECT_ID:", row.get("source_project_id"))
+            print("ACCOUNTING_ENTRY_ID:", row.get("accounting_entry_id"))
+            print("TRANSFER_STATUS:", row.get("transfer_status"))
+        else:
+            print("TRANSFER FULL NO ENCONTRADO")
+            print("TRANSFER_ID:", transfer_id)
+        print("==============================================")
+ 
+        return row
+ 
+    # ── MÉTODO 2: Resetear el transfer a estado PROCESSING para esperar nuevo ACK ──
+ 
+    def reset_accounting_transfer_for_update(
+        self,
+        db: Session,
+        transfer_id: str,
+        new_exchange_id: str,
+        new_payload_json: dict,
+    ):
+        """
+        Actualiza el registro existente en af_accounting_transfers para que quede
+        listo para esperar un nuevo ACK tras el envío de actualización:
+          - transfer_status  = 'processing'
+          - retry_count      = 0
+          - acknowledged_at  = NULL
+          - response_json    = NULL
+          - error_message    = NULL
+          - sent_at          = NOW()
+          - accounting_entry_id = new_exchange_id (ExchangeId UPD)
+          - payload_json     = nuevo payload con invoices/summary/transactions actualizados
+        """
+ 
+        new_payload_json_text = json.dumps(
+            new_payload_json,
+            ensure_ascii=False,
+            default=str
+        )
+ 
+        query = text("""
+            UPDATE public.af_accounting_transfers
+            SET
+                transfer_status     = 'processing',
+                retry_count         = 0,
+                acknowledged_at     = NULL,
+                response_json       = NULL,
+                error_message       = NULL,
+                sent_at             = NOW(),
+                accounting_entry_id = :new_exchange_id,
+                payload_json        = CAST(:new_payload_json AS jsonb)
+            WHERE transfer_id = CAST(:transfer_id AS uuid)
+        """)
+ 
+        result = db.execute(query, {
+            "transfer_id":      transfer_id,
+            "new_exchange_id":  new_exchange_id,
+            "new_payload_json": new_payload_json_text,
+        })
+ 
+        print("==============================================")
+        print("af_accounting_transfers RESETEADO PARA UPDATE")
+        print("TRANSFER_ID:", transfer_id)
+        print("NEW_EXCHANGE_ID:", new_exchange_id)
+        print("FILAS AFECTADAS:", result.rowcount)
+        print("==============================================")
+ 
+        return result.rowcount
+ 
+    # ── MÉTODO 3: Eliminar audit_receipts existentes de un transfer ─────────────
+ 
+    def delete_audit_receipts_by_transfer(
+        self,
+        db: Session,
+        accounting_transfer_id: str,
+    ):
+        """
+        Elimina todos los af_audit_receipts del transfer indicado
+        para volver a insertarlos con el nuevo payload actualizado.
+        """
+ 
+        query = text("""
+            DELETE FROM public.af_audit_receipts
+            WHERE accounting_transfer_id = CAST(:accounting_transfer_id AS uuid)
+        """)
+ 
+        result = db.execute(query, {"accounting_transfer_id": accounting_transfer_id})
+ 
+        print("==============================================")
+        print("af_audit_receipts ELIMINADOS PARA RE-CREACIÓN")
+        print("ACCOUNTING_TRANSFER_ID:", accounting_transfer_id)
+        print("FILAS ELIMINADAS:", result.rowcount)
+        print("==============================================")
+ 
+        return result.rowcount
+ 

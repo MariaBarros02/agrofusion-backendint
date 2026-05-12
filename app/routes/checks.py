@@ -4,6 +4,8 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.dependences.auth import get_current_user
 from app.schemas.checks import (
+    AccountingUpdateRequest,
+    AccountingUpdateResponse,
     CheckDetailResponse,
     CheckRefreshResponse,
     ListChecksRequest,
@@ -799,5 +801,58 @@ def refresh_check_diff(
         user_agent=user_agent,
     )
  
+
+ 
+@router.post(
+    "/{transfer_id}/update-accounting",
+    response_model=AccountingUpdateResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Actualizar comprobante contable en contabilidad",
+    description=(
+        "Recibe el diff generado por el endpoint de comparación y envía una actualización "
+        "contable a contabilidad en formato AgroFusionExchangeUpdate. "
+        "Requiere permiso 046. "
+        "Actualiza el payload_json del comprobante con las facturas y transacciones actuales, "
+        "resetea el registro a estado PROCESSING para esperar un nuevo ACK, "
+        "recrea los af_audit_receipts y crea un nuevo af_accounting_queue."
+    ),
+)
+def update_accounting_voucher(
+    transfer_id: str,
+    body: AccountingUpdateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    **Flujo:**
+    1. Valida permiso `046`.
+    2. Obtiene el comprobante existente por `transfer_id`.
+    3. Construye el payload `AgroFusionExchangeUpdate` a partir del diff.
+    4. Envía a contabilidad usando el mismo endpoint y API key configurados.
+    5. Si el envío es exitoso:
+       - Actualiza `payload_json` del transfer con las facturas/transacciones actuales.
+       - Resetea `transfer_status = processing`, `retry_count = 0`, `acknowledged_at = NULL`.
+       - Elimina y recrea `af_audit_receipts`.
+       - Crea nuevo registro en `af_accounting_queue`.
+    6. Registra auditoría con `action_code = UPDATE_ACCOUNTING_VOUCHERS`.
+ 
+    **ExchangeId UPD:** `AF-2026-05-XXXXX` → `AF-UPD-2026-05-XXXXX`
+ 
+    **StandardVersion:** se incrementa en 1.0 respecto a la versión original.
+    """
+ 
+    ip = request.client.host if request.client else None
+    user_agent = request.headers.get("User-Agent")
+    service = ChecksService()
+
+    return service.update_accounting_voucher(
+        db=db,
+        transfer_id=transfer_id,
+        diff=body.diff,
+        current_user=current_user,
+        ip=ip,
+        user_agent=user_agent,
+    )
 
 router.include_router(vouchers_router)
