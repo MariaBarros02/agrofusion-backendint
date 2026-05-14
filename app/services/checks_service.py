@@ -1,16 +1,22 @@
 import json
 import math
 from datetime import datetime
+from pydoc import text
+from typing import Optional
 from uuid import uuid4
-
+import random
 import httpx
 from fastapi import status
 from sqlalchemy.orm import Session
+from datetime import datetime, timezone, timedelta
 
 from app.core.errors import int_error
 from app.repositories.checks_repository import ChecksRepository
 from app.repositories.audit_repository import AuditRepository
 from app.schemas.checks import (
+    AccountingACKRequest,
+    AccountingACKResponse,
+    AccountingUpdateResponse,
     ListChecksRequest,
     CheckDetailResponse,
     CheckListItemResponse,
@@ -22,7 +28,12 @@ from app.schemas.checks import (
     AccountingTransferRequest,
     AccountingTransferResponse,
     AccountingTransferAccountingResponse,
+    CheckRefreshResponse,
+    InvoiceDiff,
+    TransactionDiff
 )
+
+
 from app.services.permissions_service import PermissionsService
 
 
@@ -117,6 +128,7 @@ class ChecksService:
                 id=str(row.id),
                 transaction_type=row.transaction_type,
                 project_name=row.project_name,
+                accounting_entry_id=row.accounting_entry_id,
                 project_code=row.project_code,
                 state=row.state,
                 issued_at=row.issued_at,
@@ -203,10 +215,11 @@ class ChecksService:
 
             if endpoint_config is None:
                 int_error("EXTERNAL_ENDPOINT_NOT_FOUND", status.HTTP_404_NOT_FOUND)
-
+            print("ENDPOINT: ", payload.external_endpoint_id)
             overlapping_transfer = self.repo.get_overlapping_accounting_transfer_period(
                 db,
                 payload.external_project_id,
+                payload.external_endpoint_id,
                 payload.sincePeriod,
                 payload.untilPeriod
             )
@@ -348,6 +361,18 @@ class ChecksService:
 
             try:
                 result = AccountingConsultResponse(**data)
+
+
+                random_suffix = f"{random.randint(0, 9999999):07d}"
+                current_exchange_id = result.metadata.ExchangeId
+                parts = current_exchange_id.split("-")
+                parts[-1] = random_suffix
+
+                result.metadata.ExchangeId = "-".join(parts)
+
+                # #PRUEBAAA
+                result.metadata.SourceSystem.SystemNIT = "9001766666"
+
             except Exception as ex:
                 print("RESPUESTA EXTERNA NO CUMPLE EL CONTRATO ESPERADO")
                 print("ERROR:", type(ex).__name__)
@@ -413,6 +438,7 @@ class ChecksService:
                 current_user.get("role"),
                 "043"
             ):
+                print('Sin permiso')
                 int_error("AUTH_INSUFFICIENT_PERMISSIONS", status.HTTP_403_FORBIDDEN)
 
             if not payload.external_project_id or not payload.external_project_id.strip():
@@ -423,8 +449,9 @@ class ChecksService:
 
             transfer_endpoint = self.repo.get_accounting_transfer_endpoint(
                 db=db,
-                external_project_id=payload.external_project_id
+                external_project_id= payload.external_project_id,
             )
+
 
             if transfer_endpoint is None:
                 int_error("ACCOUNTING_TRANSFER_ENDPOINT_NOT_FOUND", status.HTTP_404_NOT_FOUND)
@@ -497,83 +524,126 @@ class ChecksService:
             # 2. Eliminar o comentar el bloque de respuesta simulada.
             # ============================================================
 
-            # try:
-            #     response = httpx.request(
-            #         method=http_method,
-            #         url=str(url),
-            #         json=payload.normalized_json,
-            #         headers=headers,
-            #         timeout=60.0,
-            #         trust_env=False
-            #     )
-            #
-            # except httpx.TimeoutException as ex:
-            #     print("TIMEOUT ENVIANDO LOTE A CONTABILIDAD:", type(ex).__name__)
-            #     print("DETALLE:", str(ex))
-            #     print("URL:", url)
-            #
-            #     int_error("ACCOUNTING_TRANSFER_SEND_ERROR", status.HTTP_502_BAD_GATEWAY)
-            #
-            # except httpx.RequestError as ex:
-            #     print("ERROR ENVIANDO LOTE A CONTABILIDAD:", type(ex).__name__)
-            #     print("DETALLE:", str(ex))
-            #     print("URL:", url)
-            #
-            #     int_error("ACCOUNTING_TRANSFER_SEND_ERROR", status.HTTP_502_BAD_GATEWAY)
-            #
-            # except Exception as ex:
-            #     print("ERROR NO CONTROLADO ENVIANDO LOTE A CONTABILIDAD:", type(ex).__name__)
-            #     print("DETALLE:", str(ex))
-            #     print("URL:", url)
-            #
-            #     int_error("ACCOUNTING_TRANSFER_SEND_ERROR", status.HTTP_502_BAD_GATEWAY)
-            #
-            # if response.status_code < 200 or response.status_code >= 300:
-            #     print("CONTABILIDAD RESPONDIÓ ERROR")
-            #     print("STATUS CODE:", response.status_code)
-            #     print("RESPONSE TEXT:", response.text)
-            #
-            #     int_error("ACCOUNTING_TRANSFER_SEND_ERROR", status.HTTP_502_BAD_GATEWAY)
-            #
-            # try:
-            #     accounting_response_data = response.json()
-            # except ValueError:
-            #     print("CONTABILIDAD NO DEVOLVIÓ JSON VÁLIDO")
-            #     print("STATUS CODE:", response.status_code)
-            #     print("RESPONSE TEXT:", response.text)
-            #
-            #     int_error("ACCOUNTING_TRANSFER_INVALID_RESPONSE", status.HTTP_502_BAD_GATEWAY)
+            try:
+                response = httpx.request(
+                    method=http_method,
+                    url=str(url),
+                    json=payload.normalized_json,
+                    headers=headers,
+                    timeout=60.0,
+                    trust_env=False
+                )
+            
+            except httpx.TimeoutException as ex:
+                print("TIMEOUT ENVIANDO LOTE A CONTABILIDAD:", type(ex).__name__)
+                print("DETALLE:", str(ex))
+                print("URL:", url)
+            
+                int_error("ACCOUNTING_TRANSFER_SEND_ERROR", status.HTTP_502_BAD_GATEWAY, meta={
+                    "error_type": type(ex).__name__,
+                    "detail": str(ex),
+                    "url": url,
+                    "external_response": None  # No hay respuesta porque fue timeout
+                })
+            
+            except httpx.RequestError as ex:
+                print("ERROR ENVIANDO LOTE A CONTABILIDAD:", type(ex).__name__)
+                print("DETALLE:", str(ex))
+                print("URL:", url)
+            
+                 # Intentar parsear la respuesta como JSON si es posible
+                external_response_data = None
+                try:
+                    external_response_data = response.json()
+                except:
+                    external_response_data = {"raw_text": response.text}
+                
+                int_error(
+                    "ACCOUNTING_TRANSFER_SEND_ERROR", 
+                    status.HTTP_502_BAD_GATEWAY,
+                    meta=external_response_data
+                    
+                )
+            
+            except Exception as ex:
+                print("ERROR NO CONTROLADO ENVIANDO LOTE A CONTABILIDAD:", type(ex).__name__)
+                print("DETALLE:", str(ex))
+                print("URL:", url)
 
-            # ============================================================
-            # RESPUESTA SIMULADA SEGÚN REQUERIMIENTO
-            # ============================================================
+                # Intentar parsear la respuesta como JSON si es posible
+                external_response_data = None
+                try:
+                    external_response_data = response.json()
+                except:
+                    external_response_data = {"raw_text": response.text}
+                
+                int_error(
+                    "ACCOUNTING_TRANSFER_SEND_ERROR", 
+                    status.HTTP_502_BAD_GATEWAY,
+                    meta=external_response_data
+                    
+                )
+            
+            if response.status_code < 200 or response.status_code >= 300:
+                print("CONTABILIDAD RESPONDIÓ ERROR")
+                print("STATUS CODE:", response.status_code)
+                print("RESPONSE TEXT:", response.text)
 
-            metadata = payload.normalized_json.get("metadata") or {}
-            original_exchange_id = metadata.get("ExchangeId")
+                # Intentar parsear la respuesta como JSON si es posible
+                external_response_data = None
+                try:
+                    external_response_data = response.json()
+                except:
+                    external_response_data = {"raw_text": response.text}
+                
+                int_error(
+                    "ACCOUNTING_TRANSFER_SEND_ERROR", 
+                    status.HTTP_502_BAD_GATEWAY,
+                    meta=response.text
+                    
+                )
+                        
+            try:
+                accounting_response_data = response.json()
+                print("DATA DE CONTABILIDAD:", accounting_response_data)
+            except ValueError:
+                print("CONTABILIDAD NO DEVOLVIÓ JSON VÁLIDO")
+                print("STATUS CODE:", response.status_code)
+                print("RESPONSE TEXT:", response.text)
+            
+                int_error("ACCOUNTING_TRANSFER_INVALID_RESPONSE", status.HTTP_502_BAD_GATEWAY)
 
-            # La BD espera UUID en af_accounting_transfers.accounting_entry_id.
-            # Por eso la simulación devuelve un UUID válido como exchangeId.
-            simulated_exchange_id = str(uuid4())
-            simulated_batch_id = int(datetime.utcnow().strftime("%H%M%S"))
+            # # ============================================================
+            # # RESPUESTA SIMULADA SEGÚN REQUERIMIENTO
+            # # ============================================================
 
-            accounting_response_data = {
-                "success": True,
-                "exchangeId": simulated_exchange_id,
-                "batchId": simulated_batch_id,
-                "status": "RECEIVED"
-            }
+            # metadata = payload.normalized_json.get("metadata") or {}
+            # original_exchange_id = metadata.get("ExchangeId")
 
-            print("==============================================")
-            print("RESPUESTA SIMULADA DE CONTABILIDAD")
-            print("EXCHANGE ID ORIGINAL DEL JSON:", original_exchange_id)
-            print("EXCHANGE ID SIMULADO UUID PARA BD:", simulated_exchange_id)
-            print("DATA:", accounting_response_data)
-            print("==============================================")
+            # # La BD espera UUID en af_accounting_transfers.accounting_entry_id.
+            # # Por eso la simulación devuelve un UUID válido como exchangeId.
+            # simulated_exchange_id =  original_exchange_id
+            # simulated_batch_id = int(datetime.utcnow().strftime("%H%M%S"))
+
+            # accounting_response_data = {
+            #     "success": True,
+            #     "exchangeId": simulated_exchange_id,
+            #     "batchId": simulated_batch_id,
+            #     "status": "RECEIVED"
+            # }
+
+            # print("==============================================")
+            # print("RESPUESTA SIMULADA DE CONTABILIDAD")
+            # print("EXCHANGE ID ORIGINAL DEL JSON:", original_exchange_id)
+            # print("EXCHANGE ID SIMULADO UUID PARA BD:", simulated_exchange_id)
+            # print("DATA:", accounting_response_data)
+            # print("==============================================")
 
             try:
                 accounting_response = AccountingTransferAccountingResponse(
                     **accounting_response_data
                 )
+                print("RESPUESTA DE CONTABILIDAD PARSEADA CON ÉXITO")
             except Exception as ex:
                 print("RESPUESTA DE CONTABILIDAD NO CUMPLE EL CONTRATO ESPERADO")
                 print("ERROR:", type(ex).__name__)
@@ -585,8 +655,19 @@ class ChecksService:
             if accounting_response.success is False:
                 print("CONTABILIDAD REPORTÓ RESPUESTA NEGATIVA")
                 print("DATA:", accounting_response_data)
-
-                int_error("ACCOUNTING_TRANSFER_SEND_ERROR", status.HTTP_502_BAD_GATEWAY)
+                 # Intentar parsear la respuesta como JSON si es posible
+                external_response_data = None
+                try:
+                    external_response_data = response.json()
+                except:
+                    external_response_data = {"raw_text": response.text}
+                
+                int_error(
+                    "ACCOUNTING_TRANSFER_SEND_ERROR", 
+                    status.HTTP_502_BAD_GATEWAY,
+                    meta=response.text
+                    
+                )
 
             exchange_id = accounting_response.exchangeId
 
@@ -597,11 +678,28 @@ class ChecksService:
                 self._get_value(transfer_endpoint, "endpoint_name")
                 or "Accounting transfer"
             )
+            actor_id = self._get_actor_id(current_user)
+            endpoint_config = self.repo.get_accounting_consult_endpoint(
+                db,
+                payload.external_project_id,
+                payload.external_endpoint_id
+            )
 
+            queue_id = self.repo.create_accounting_queue(
+                db=db,
+                source_project_id=payload.external_project_id,
+                source_module_code=endpoint_config["endpoint_name"],
+                transaction_type=endpoint_config["endpoint_name"],
+                transaction_data=payload.normalized_json,
+                user_id=actor_id
+            )
+           
             transfer_id = self.repo.create_accounting_transfer(
                 db=db,
+                queue_id=str(queue_id),
                 external_project_id=payload.external_project_id,
-                transaction_type=str(endpoint_name),
+                external_endpoint_id= payload.external_endpoint_id,
+                transaction_type=endpoint_config["endpoint_name"],
                 payload_json=payload.normalized_json,
                 accounting_entry_id=exchange_id
             )
@@ -644,6 +742,241 @@ class ChecksService:
             )
 
             raise
+    def process_accounting_ack(
+        self,
+        db: Session,
+        payload: AccountingACKRequest,
+        ip: str = None,
+        user_agent: str = None,
+    ):
+        try:
+            # ── 1. Validaciones ────────────────────────────────────────────
+            if not payload.exchangeId or not payload.exchangeId.strip():
+                int_error("ACCOUNTING_ACK_EXCHANGE_ID_REQUIRED", status.HTTP_400_BAD_REQUEST)
+
+            if not payload.status or not payload.status.strip():
+                int_error("ACCOUNTING_ACK_STATUS_REQUIRED", status.HTTP_400_BAD_REQUEST)
+
+            # ── 2. Buscar lote ─────────────────────────────────────────────
+            transfer = self.repo.get_accounting_transfer_by_exchange_id(
+                db=db,
+                exchange_id=payload.exchangeId,
+            )
+
+            if transfer is None:
+                int_error("ACCOUNTING_ACK_TRANSFER_NOT_FOUND", status.HTTP_404_NOT_FOUND)
+
+            transfer_id  = str(transfer.transfer_id)
+            ack_status   = payload.status.upper()
+            has_failures = bool(payload.failedDocuments)
+            now          = datetime.utcnow()
+            ack_payload  = payload.dict()
+
+            # ── 3. Procesar resultado ──────────────────────────────────────
+            if ack_status == "PROCESSED" and not has_failures:
+                # ── 3a. Lote 100% exitoso ──────────────────────────────
+                transfer_status = "sent"
+
+                self.repo.update_accounting_transfer_ack(
+                    db=db,
+                    transfer_id=transfer_id,
+                    transfer_status=transfer_status,
+                    acknowledged_at=now,
+                    response_json=ack_payload,
+                )
+                self.repo.update_accounting_queue_status(
+                    db=db,
+                    transfer_id=transfer_id,
+                    queue_status=transfer_status,
+                    processed_at=now,                    # ← nuevo
+                )
+                self.repo.update_audit_receipts_status(
+                    db=db,
+                    accounting_transfer_id=transfer_id,
+                    status="sent",
+                )
+                outcome      = "success"
+                message_code = "ACCOUNTING_ACK_PROCESSED"
+
+            elif ack_status == "PARTIAL" or (ack_status == "PROCESSED" and has_failures):
+                # ── 3b. Lote PARTIAL ──────────────────────────────────
+                transfer_status = "partial"
+
+                self.repo.update_accounting_transfer_ack(
+                    db=db,
+                    transfer_id=transfer_id,
+                    transfer_status=transfer_status,
+                    acknowledged_at=now,
+                    response_json=ack_payload,
+                )
+                self.repo.update_accounting_queue_status(
+                    db=db,
+                    transfer_id=transfer_id,
+                    queue_status=transfer_status,
+                    processed_at=now,                    # ← nuevo
+                )
+
+                # Documentos exitosos → sent
+                for doc in (payload.processedDocuments or []):
+                    self.repo.update_audit_receipt_sent(
+                        db=db,
+                        accounting_transfer_id=transfer_id,
+                        document_id=doc.documentId,
+                    )
+
+                # Documentos fallidos → failed + error_log con fragmento completo del ACK
+                for failed_doc in (payload.failedDocuments or []):
+                    self.repo.update_audit_receipt_failed(
+                        db=db,
+                        accounting_transfer_id=transfer_id,
+                        document_id=failed_doc.documentId,
+                        failed_at=now,
+                        error_log={                          # fragmento exacto del ACK
+                            "documentId":       failed_doc.documentId,
+                            "documentType":     failed_doc.documentType,
+                            "status":           failed_doc.status,
+                            "accountingEntryId": failed_doc.accountingEntryId,
+                            "errorCode":        failed_doc.errorCode,
+                            "errorMessage":     failed_doc.errorMessage,
+                        },
+                    )
+
+                outcome      = "partial"
+                message_code = "ACCOUNTING_ACK_PARTIAL"
+
+            else:
+                # ── 3c. Lote FAILED ───────────────────────────────────
+                transfer_status = "failed"
+
+                self.repo.update_accounting_transfer_ack(
+                    db=db,
+                    transfer_id=transfer_id,
+                    transfer_status=transfer_status,
+                    acknowledged_at=now,
+                    response_json=ack_payload,
+                )
+                self.repo.update_accounting_queue_status(
+                    db=db,
+                    transfer_id=transfer_id,
+                    queue_status=transfer_status,
+                    processed_at=now,                    # ← nuevo
+                )
+
+                # Todos fallidos → failed + error_log con fragmento completo del ACK
+                for failed_doc in (payload.failedDocuments or []):
+                    self.repo.update_audit_receipt_failed(
+                        db=db,
+                        accounting_transfer_id=transfer_id,
+                        document_id=failed_doc.documentId,
+                        failed_at=now,
+                        error_log={                          # fragmento exacto del ACK
+                            "documentId":       failed_doc.documentId,
+                            "documentType":     failed_doc.documentType,
+                            "status":           failed_doc.status,
+                            "accountingEntryId": failed_doc.accountingEntryId,
+                            "errorCode":        failed_doc.errorCode,
+                            "errorMessage":     failed_doc.errorMessage,
+                        },
+                    )
+
+                outcome      = "failure"
+                message_code = "ACCOUNTING_ACK_FAILED"
+            db.commit()
+
+            # ── 4. Auditoría ───────────────────────────────────────────────
+            self._log_accounting_ack_audit(
+                db=db,
+                transfer=transfer,
+                exchange_id=payload.exchangeId,
+                outcome=outcome,
+                ip=ip,
+                user_agent=user_agent,
+            )
+
+            return AccountingACKResponse(
+                success=True,
+                message_code=message_code,
+                exchange_id=payload.exchangeId,
+            )
+
+        except Exception:
+            db.rollback()
+            self._log_accounting_ack_audit(
+                db=db,
+                transfer=None,
+                exchange_id=getattr(payload, "exchangeId", None),
+                outcome="failure",
+                ip=ip,
+                user_agent=user_agent,
+            )
+            raise
+    def update_audit_receipt_sent(
+        self,
+        db: Session,
+        accounting_transfer_id: str,
+        document_id: str,
+    ):
+        """
+        Marca como 'sent' el af_audit_receipt cuyo payload->>'documentId'
+        coincida con document_id. Se usa en lotes PARTIAL para los documentos
+        que sí fueron procesados exitosamente.
+        """
+        query = text("""
+            UPDATE public.af_audit_receipts
+            SET status = 'sent'
+            WHERE
+                accounting_transfer_id = CAST(:accounting_transfer_id AS uuid)
+                AND payload->>'documentId' = :document_id
+        """)
+
+        result = db.execute(query, {
+            "accounting_transfer_id": accounting_transfer_id,
+            "document_id": document_id,
+        })
+
+        print("==============================================")
+        print("af_audit_receipt MARCADO COMO SENT (PARCIAL)")
+        print("ACCOUNTING_TRANSFER_ID:", accounting_transfer_id)
+        print("DOCUMENT_ID:", document_id)
+        print("FILAS AFECTADAS:", result.rowcount)
+        print("==============================================")
+
+        
+    def _log_accounting_ack_audit(
+        self,
+        db: Session,
+        transfer,
+        exchange_id: str,
+        outcome: str,
+        ip: str = None,
+        user_agent: str = None,
+    ):
+        try:
+            project = self.audit_repo.get_project_by_code(db, code="AGROFUSION")
+
+            # El ACK es público, no hay usuario autenticado
+            # Se usa un actor_id neutro (None o un sistema)
+            self.audit_repo.log_event(
+                db=db,
+                action_code="ACCOUNTING_ACK",
+                outcome=outcome,
+                module_code="ACCOUNTING_VOUCHERS",
+                project_id=project.af_project_id,
+                actor_id=None,
+                ip=ip,
+                user_agent=user_agent,
+                metadata={
+                    "external_project": (
+                        str(transfer.source_project_id)
+                        if transfer is not None
+                        else None
+                    ),
+                    "ExchangeId": exchange_id,
+                },
+            )
+        except Exception as audit_ex:
+            # La auditoría nunca debe tumbar el flujo principal
+            print("ERROR REGISTRANDO AUDITORÍA ACK:", type(audit_ex).__name__, str(audit_ex))
 
     def _validate_accounting_period(
         self,
@@ -1241,3 +1574,990 @@ class ChecksService:
                 pass
 
         return None
+    
+
+# ============================================================
+# Reemplaza refresh_check_diff y _diff_documents en ChecksService
+# ============================================================
+
+    def refresh_check_diff(
+        self,
+        db: Session,
+        transfer_id: str,
+        current_user: dict,
+        ip: str = None,
+        user_agent: str = None,
+    ) -> "CheckRefreshResponse":
+
+        # ── 1. Permiso 046 ──────────────────────────────────────────────
+        if not self.perm_service.validate_permission(
+            db,
+            current_user.get("role"),
+            "046"
+        ):
+            int_error("AUTH_INSUFFICIENT_PERMISSIONS", status.HTTP_403_FORBIDDEN)
+
+        # ── 2. Obtener datos del transfer + endpoint de BD ───────────────
+        transfer_row = self.repo.get_transfer_for_refresh(db, transfer_id)
+
+        if transfer_row is None:
+            int_error("CHECK_NOT_FOUND", status.HTTP_404_NOT_FOUND)
+
+        raw_payload = self._get_value(transfer_row, "payload_json")
+
+        if not raw_payload:
+            int_error("CHECK_PAYLOAD_JSON_MISSING", status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+        # ── CRÍTICO: normalizar payload_json a dict si viene como string ─
+        payload_json = self._parse_json_field(raw_payload)
+
+        print("==============================================")
+        print("REFRESH — TIPO payload_json:", type(payload_json))
+        print("REFRESH — KEYS payload_json:", list(payload_json.keys()) if isinstance(payload_json, dict) else "NO ES DICT")
+        print("==============================================")
+
+        if not isinstance(payload_json, dict):
+            int_error("CHECK_PAYLOAD_JSON_INVALID", status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+        # ── 3. Extraer periodo ──────────────────────────────────────────
+        try:
+            metadata_stored = payload_json.get("metadata") or {}
+            requested_period = metadata_stored.get("RequestedPeriod") or {}
+            since_period = requested_period.get("From", "").strip()
+            until_period = requested_period.get("To", "").strip()
+        except Exception:
+            int_error("CHECK_PERIOD_EXTRACTION_FAILED", status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+        if not since_period or not until_period:
+            int_error("CHECK_PERIOD_MISSING", status.HTTP_422_UNPROCESSABLE_ENTITY)
+
+        # ── 4. Armar URL y cabeceras ────────────────────────────────────
+        url_template = self._get_value(transfer_row, "url")
+
+        if not url_template:
+            int_error("EXTERNAL_ENDPOINT_URL_EMPTY", status.HTTP_400_BAD_REQUEST)
+
+        url = self._build_accounting_consult_url(
+            str(url_template),
+            since_period,
+            until_period
+        )
+
+        headers = self._build_external_endpoint_headers(transfer_row)
+
+        is_protected = self._is_truthy(
+            self._get_value(transfer_row, "is_protected")
+        )
+
+        if is_protected:
+            class _MinimalConsultPayload:
+                def __init__(self, project_id, endpoint_id):
+                    self.external_project_id = project_id
+                    self.external_endpoint_id = endpoint_id
+
+            source_project_id    = str(self._get_value(transfer_row, "source_project_id"))
+            external_endpoint_id = str(self._get_value(transfer_row, "external_endpoint_id"))
+
+            external_token = self._request_external_service_token(
+                db=db,
+                payload=_MinimalConsultPayload(source_project_id, external_endpoint_id),
+                current_user=current_user
+            )
+            headers["Authorization"] = f"Bearer {external_token}"
+
+        safe_headers = dict(headers)
+        if "Authorization" in safe_headers:
+            safe_headers["Authorization"] = "Bearer ***"
+
+        print("==============================================")
+        print("REFRESH CHECK DIFF — LLAMADA EXTERNA")
+        print("TRANSFER_ID:", transfer_id)
+        print("URL:", url)
+        print("IS_PROTECTED:", is_protected)
+        print("HEADERS:", safe_headers)
+        print("==============================================")
+
+        # ── 5. Llamada al endpoint externo ──────────────────────────────
+        response = None
+        try:
+            response = httpx.get(url, headers=headers, timeout=60.0, trust_env=False)
+        except httpx.TimeoutException as ex:
+            print("TIMEOUT REFRESH ENDPOINT:", type(ex).__name__, str(ex))
+            int_error("EXT_ACCOUNTING_INFO", status.HTTP_502_BAD_GATEWAY)
+        except httpx.RequestError as ex:
+            print("ERROR REFRESH ENDPOINT:", type(ex).__name__, str(ex))
+            int_error("EXT_ACCOUNTING_INFO", status.HTTP_502_BAD_GATEWAY)
+        except Exception as ex:
+            print("ERROR NO CONTROLADO REFRESH ENDPOINT:", type(ex).__name__, str(ex))
+            int_error("EXT_ACCOUNTING_INFO", status.HTTP_502_BAD_GATEWAY)
+
+        if response.status_code < 200 or response.status_code >= 300:
+            print("REFRESH ENDPOINT RESPONDIÓ ERROR:", response.status_code, response.text)
+            int_error("EXT_ACCOUNTING_INFO", status.HTTP_502_BAD_GATEWAY)
+
+        try:
+            fresh_data = response.json()
+        except ValueError:
+            print("REFRESH ENDPOINT NO DEVOLVIÓ JSON VÁLIDO:", response.text)
+            int_error("EXT_ACCOUNTING_INFO", status.HTTP_502_BAD_GATEWAY)
+
+        # ── 6. Construir diff ───────────────────────────────────────────
+        old_metadata  = payload_json.get("metadata")     or {}
+        new_metadata  = fresh_data.get("metadata")       or {}
+        old_summary   = payload_json.get("summary")      or {}
+        new_summary   = fresh_data.get("summary")        or {}
+        old_invoices  = payload_json.get("invoices")     or []
+        new_invoices  = fresh_data.get("invoices")       or []
+        old_txs       = payload_json.get("transactions") or []
+        new_txs       = fresh_data.get("transactions")   or []
+
+        print("==============================================")
+        print("REFRESH — old_invoices count:", len(old_invoices))
+        print("REFRESH — new_invoices count:", len(new_invoices))
+        print("REFRESH — old_txs count:", len(old_txs))
+        print("REFRESH — new_txs count:", len(new_txs))
+        print("==============================================")
+        # ── Normalizar campos volátiles del metadata ────────────────────
+        # ExchangeId y GeneratedAt cambian en cada consulta al endpoint
+        # externo y no representan cambios de negocio, por eso se igualan
+        # al valor almacenado en BD antes de comparar.
+        METADATA_VOLATILE_FIELDS = ("ExchangeId", "GeneratedAt",  "SourceSystem")
+ 
+        new_metadata_normalized = {**new_metadata}
+        for field in METADATA_VOLATILE_FIELDS:
+            if field in old_metadata:
+                new_metadata_normalized[field] = old_metadata[field]
+ 
+
+        invoice_diffs     = self._diff_documents(old_invoices, new_invoices, "DocumentId")
+        transaction_diffs = self._diff_documents(old_txs,      new_txs,      "DocumentId")
+
+        has_changes = (
+            self._canonical(old_metadata) != self._canonical(new_metadata_normalized)
+            or self._canonical(old_summary) != self._canonical(new_summary)
+            or bool(invoice_diffs)
+            or bool(transaction_diffs)
+        )
+
+        print("==============================================")
+        print("REFRESH CHECK DIFF — RESULTADO")
+        print("TRANSFER_ID:", transfer_id)
+        print("HAS_CHANGES:", has_changes)
+        print("INVOICE_DIFFS:", len(invoice_diffs))
+        print("TRANSACTION_DIFFS:", len(transaction_diffs))
+        print("==============================================")
+
+        return CheckRefreshResponse(
+            has_changes=has_changes,
+            previous_metadata=old_metadata,
+            current_metadata=new_metadata_normalized,
+            previous_summary=old_summary,
+            current_summary=new_summary,
+            invoice_diffs=[InvoiceDiff(**d) for d in invoice_diffs],
+            transaction_diffs=[TransactionDiff(**d) for d in transaction_diffs],
+            current_invoices=new_invoices,       # todas las facturas del fresh data
+            current_transactions=new_txs,  
+        )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Helpers privados
+    # ──────────────────────────────────────────────────────────────────
+
+    def _parse_json_field(self, value) -> dict:
+        """
+        Garantiza que un campo JSONB de SQLAlchemy siempre sea dict.
+        PostgreSQL/SQLAlchemy a veces entrega JSONB como str, otras como dict.
+        """
+        if isinstance(value, dict):
+            return value
+
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (ValueError, TypeError):
+                pass
+
+        return {}
+# ============================================================
+# Solo reemplaza el método _normalize_for_compare en ChecksService
+# ============================================================
+
+    def _normalize_for_compare(self, obj):
+        """
+        Normaliza recursivamente cualquier objeto para comparación canónica.
+
+        Casos que maneja:
+        - str que parece JSON  → parsea primero
+        - dict                 → ordena claves en TODOS los niveles
+        - list                 → normaliza cada elemento (mantiene orden)
+        - float sin decimales  → convierte a int  (120000.0 == 120000)
+        - escalar              → devuelve tal cual
+        """
+        if isinstance(obj, str):
+            try:
+                obj = json.loads(obj)
+            except (ValueError, TypeError):
+                return obj
+
+        if isinstance(obj, dict):
+            return {k: self._normalize_for_compare(v) for k, v in sorted(obj.items())}
+
+        if isinstance(obj, list):
+            return [self._normalize_for_compare(i) for i in obj]
+
+        # ── CLAVE: igualar 120000.0 y 120000 ──────────────────────────
+        if isinstance(obj, float) and obj == int(obj):
+            return int(obj)
+
+        return obj
+
+    def _canonical(self, obj) -> str:
+        """Convierte un objeto a string canónico para comparación."""
+        return json.dumps(self._normalize_for_compare(obj), ensure_ascii=False)
+
+    def _diff_documents(
+        self,
+        old_list: list,
+        new_list: list,
+        id_key: str = "DocumentId",
+    ) -> list:
+        """
+        Compara dos listas de documentos por su ID y devuelve solo
+        los que fueron creados, modificados o eliminados.
+
+        Busca el ID en:
+          1. item[id_key]           → transacciones
+          2. item["Header"][id_key] → facturas
+          3. fallback posicional
+        """
+
+        def extract_id(item: dict, idx: int) -> str:
+            val = item.get(id_key)
+            if val:
+                return str(val)
+            header = item.get("Header")
+            if isinstance(header, dict):
+                val = header.get(id_key)
+                if val:
+                    return str(val)
+            print(f"[_diff_documents] WARNING: '{id_key}' no encontrado en índice {idx}, usando fallback")
+            return f"__idx_{idx}__"
+
+        old_map = {extract_id(item, idx): item for idx, item in enumerate(old_list)}
+        new_map = {extract_id(item, idx): item for idx, item in enumerate(new_list)}
+
+        print("==============================================")
+        print("_diff_documents — old_map keys:", list(old_map.keys()))
+        print("_diff_documents — new_map keys:", list(new_map.keys()))
+        print("==============================================")
+
+        all_keys = set(old_map.keys()) | set(new_map.keys())
+        diffs = []
+
+        for key in all_keys:
+            in_old = key in old_map
+            in_new = key in new_map
+
+            if in_old and not in_new:
+                diffs.append({"change_type": "deleted", "previous": old_map[key], "current": None})
+
+            elif not in_old and in_new:
+                diffs.append({"change_type": "created", "previous": None, "current": new_map[key]})
+
+            else:
+                old_canon = self._canonical(old_map[key])
+                new_canon = self._canonical(new_map[key])
+
+                print(f"  [{key}] old_canon == new_canon: {old_canon == new_canon}")
+                # TEMPORAL - BORRAR DESPUÉS
+                print(f"  [{key}] IGUAL: {old_canon == new_canon}")
+                print(f"  OLD: {old_canon}")
+                print(f"  NEW: {new_canon}")
+                if old_canon != new_canon:
+                    diffs.append({"change_type": "modified", "previous": old_map[key], "current": new_map[key]})
+
+        return diffs
+
+
+
+# ============================================================
+# RF-INT-XX - Actualización de comprobante contable a contabilidad
+# Agregar este método a ChecksService (checks_service.py)
+# ============================================================
+#
+# RESUMEN DEL FLUJO:
+#   1. Validar permiso 046
+#   2. Obtener el transfer existente de BD (transfer_id en path)
+#   3. Construir el ExchangeId UPD y el payload AgroFusionExchangeUpdate
+#   4. Enviar a contabilidad usando mismo endpoint/headers que la transferencia original
+#   5. Si éxito: actualizar payload_json del transfer + resetear a PROCESSING/retry_count=0
+#   6. Recrear af_audit_receipts con invoices y transactions actualizados
+#   7. Crear nuevo registro en af_accounting_queue
+#   8. Registrar auditoría con action_code UPDATE_ACCOUNTING_VOUCHERS
+# ============================================================
+ 
+    def update_accounting_voucher(
+        self,
+        db: Session,
+        transfer_id: str,
+        diff: dict,
+        current_user: dict,
+        ip: str = None,
+        user_agent: str = None,
+    ):
+        """
+        Envía una actualización contable (AgroFusionExchangeUpdate) a contabilidad
+        usando el diff retornado por el endpoint de comparación, y actualiza el estado
+        del comprobante en BD para que quede listo para recibir un nuevo ACK.
+        """
+ 
+        try:
+            # ── 1. Validar permiso 046 ───────────────────────────────────
+            if not self.perm_service.validate_permission(
+                db,
+                current_user.get("role"),
+                "046"
+            ):
+                int_error("AUTH_INSUFFICIENT_PERMISSIONS", status.HTTP_403_FORBIDDEN)
+ 
+            # ── 2. Obtener el transfer existente ─────────────────────────
+            transfer_row = self.repo.get_transfer_full_by_id(db, transfer_id)
+ 
+            if transfer_row is None:
+                int_error("CHECK_NOT_FOUND", status.HTTP_404_NOT_FOUND)
+ 
+            raw_payload = self._get_value(transfer_row, "payload_json")
+            if not raw_payload:
+                int_error("CHECK_PAYLOAD_JSON_MISSING", status.HTTP_422_UNPROCESSABLE_ENTITY)
+ 
+            payload_json = self._parse_json_field(raw_payload)
+            if not isinstance(payload_json, dict):
+                int_error("CHECK_PAYLOAD_JSON_INVALID", status.HTTP_422_UNPROCESSABLE_ENTITY)
+ 
+            source_project_id    = str(self._get_value(transfer_row, "source_project_id"))
+            external_endpoint_id = str(self._get_value(transfer_row, "external_endpoint_id"))
+            transaction_type     = self._get_value(transfer_row, "transaction_type") or "Accounting Update"
+            original_exchange_id = self._get_value(transfer_row, "accounting_entry_id") or ""
+ 
+            # ── 3. Construir ExchangeId UPD ──────────────────────────────
+            # Ejemplo: AF-2026-05-5261922 → AF-UPD-2026-05-5261922
+            upd_exchange_id = self._build_upd_exchange_id(original_exchange_id)
+ 
+            # ── 4. Incrementar StandardVersion ───────────────────────────
+            old_metadata = payload_json.get("metadata") or {}
+            original_std_version = old_metadata.get("StandardVersion", "1.0")
+            new_std_version = self._increment_standard_version(original_std_version)
+ 
+            # ── 5. Construir el payload AgroFusionExchangeUpdate ─────────
+            now_iso = datetime.now(timezone(timedelta(hours=-5))).isoformat()
+            actor_email = "agrofusion-integration-service"
+ 
+            invoice_diffs     = diff.get("invoice_diffs", [])
+            transaction_diffs = diff.get("transaction_diffs", [])
+ 
+            changes_invoices     = self._build_update_invoice_changes(invoice_diffs)
+            changes_transactions = self._build_update_transaction_changes(transaction_diffs)
+ 
+            total_new      = sum(1 for d in invoice_diffs if d.get("change_type") == "created")
+            total_modified = sum(1 for d in invoice_diffs if d.get("change_type") == "modified")
+            total_deleted  = sum(1 for d in invoice_diffs if d.get("change_type") == "deleted")
+            total_changes  = total_new + total_modified + total_deleted
+ 
+            current_summary = diff.get("current_summary") or {}
+            previous_summary = diff.get("previous_summary") or {}
+            net_delta = (
+                float(current_summary.get("TotalNet", 0)) -
+                float(previous_summary.get("TotalNet", 0))
+            )
+            currency = current_summary.get("Currency", previous_summary.get("Currency", "COP"))
+ 
+            source_system = old_metadata.get("SourceSystem") or {}
+            requested_period = old_metadata.get("RequestedPeriod") or {}
+ 
+            agro_fusion_update_payload = {
+                "AgroFusionExchangeUpdate": {
+                    "version": "1.0",
+                    "Metadata": {
+                        "ExchangeId": upd_exchange_id,
+                        "OriginalExchangeId": original_exchange_id,
+                        "GeneratedAt": now_iso,
+                        "StandardVersion": new_std_version,
+                        "UpdateType": "PARTIAL",
+                        "RequestedPeriod": {
+                            "From": requested_period.get("From", ""),
+                            "To": requested_period.get("To", ""),
+                        },
+                        "DetectionMethod": "MANUAL",
+                        "DetectedAt": now_iso,
+                        "SourceSystem": {
+                            "SystemId": source_system.get("SystemId", ""),
+                            "SystemName": source_system.get("SystemName", ""),
+                            "SystemNIT": source_system.get("SystemNIT", ""),
+                            "Environment": source_system.get("Environment", "production"),
+                        },
+                        "GeneratedBy": actor_email,
+                    },
+                    "DiffSummary": {
+                        "TotalChanges": total_changes,
+                        "NewDocuments": total_new,
+                        "ModifiedDocuments": total_modified,
+                        "CancelledDocuments": total_deleted,
+                        "NoChangeDocuments": 0,
+                        "NetAmountDelta": net_delta,
+                        "Currency": currency,
+                    },
+                    "Changes": {
+                        "Invoices": changes_invoices,
+                        "Transactions": changes_transactions,
+                    },
+                    "ExpectedAcknowledgment": {
+                        "AckFormat": "JSON",
+                        "ExpectedWithinMinutes": 30,
+                        "RequiredFields": [
+                            "OriginalExchangeId",
+                            "ProcessedAt",
+                            "ProcessedDocuments",
+                            "AccountingEntryId",
+                            "FailedDocuments",
+                            "Status",
+                        ],
+                    },
+                }
+            }
+ 
+            print("==============================================")
+            print("PAYLOAD AgroFusionExchangeUpdate CONSTRUIDO")
+            print("UPD_EXCHANGE_ID:", upd_exchange_id)
+            print("ORIGINAL_EXCHANGE_ID:", original_exchange_id)
+            print("NEW_STD_VERSION:", new_std_version)
+            print("TOTAL_CHANGES:", total_changes)
+            print("==============================================")
+ 
+            # ── 6. Obtener endpoint de transferencia y enviar ────────────
+            transfer_endpoint = self.repo.get_accounting_transfer_endpoint(
+                db=db,
+                external_project_id=source_project_id,
+            )
+ 
+            if transfer_endpoint is None:
+                int_error("ACCOUNTING_TRANSFER_ENDPOINT_NOT_FOUND", status.HTTP_404_NOT_FOUND)
+ 
+            url = self._get_value(transfer_endpoint, "url")
+ 
+            if not url:
+                int_error("ACCOUNTING_TRANSFER_ENDPOINT_URL_EMPTY", status.HTTP_400_BAD_REQUEST)
+ 
+            if not str(url).lower().startswith("http://") and not str(url).lower().startswith("https://"):
+                int_error("ACCOUNTING_TRANSFER_ENDPOINT_URL_INVALID", status.HTTP_400_BAD_REQUEST)
+ 
+            method_term_id = self._get_value(transfer_endpoint, "method_term_id")
+            if not method_term_id:
+                int_error("ACCOUNTING_TRANSFER_METHOD_TERM_REQUIRED", status.HTTP_400_BAD_REQUEST)
+ 
+            method_value = self.repo.get_cat_term_value(db=db, term_id=str(method_term_id))
+            http_method  = self._normalize_http_method(method_value)
+ 
+            api_key_template = (
+                self._get_value(transfer_endpoint, "response_template")
+                or self._get_value(transfer_endpoint, "params_template")
+                or self._get_value(transfer_endpoint, "body_template")
+            )
+ 
+            api_key_headers = self._build_accounting_transfer_api_key_headers(api_key_template)
+ 
+            headers = {
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                **api_key_headers,
+            }
+ 
+            safe_headers = dict(headers)
+            for secret_header in ["x-api-key", "X-API-Key", "Authorization"]:
+                if secret_header in safe_headers:
+                    safe_headers[secret_header] = "***"
+ 
+            print("==============================================")
+            print("ENVIANDO ACTUALIZACIÓN CONTABLE")
+            print("URL:", url)
+            print("METHOD:", http_method)
+            print("HEADERS:", safe_headers)
+            print("UPD_EXCHANGE_ID:", upd_exchange_id)
+            print("==============================================")
+
+            # ============================================================
+            # LLAMADA REAL AL ENDPOINT DE CONTABILIDAD
+            # Comentada temporalmente porque el servicio externo está caído.
+            # Cuando SIGCON vuelva a estar disponible:
+            # 1. Descomentar este bloque.
+            # 2. Eliminar o comentar el bloque de respuesta simulada.
+            # ============================================================
+ 
+            # try:
+            #     response = httpx.request(
+            #         method=http_method,
+            #         url=str(url),
+            #         json=agro_fusion_update_payload,
+            #         headers=headers,
+            #         timeout=60.0,
+            #         trust_env=False
+            #     )
+            # except httpx.TimeoutException as ex:
+            #     print("TIMEOUT ENVIANDO ACTUALIZACIÓN A CONTABILIDAD:", type(ex).__name__, str(ex))
+            #     int_error("ACCOUNTING_TRANSFER_SEND_ERROR", status.HTTP_502_BAD_GATEWAY, meta={
+            #         "error_type": type(ex).__name__,
+            #         "detail": str(ex),
+            #         "url": url,
+            #         "external_response": None
+            #     })
+            # except httpx.RequestError as ex:
+            #     print("ERROR ENVIANDO ACTUALIZACIÓN A CONTABILIDAD:", type(ex).__name__, str(ex))
+            #     int_error("ACCOUNTING_TRANSFER_SEND_ERROR", status.HTTP_502_BAD_GATEWAY, meta={
+            #         "error_type": type(ex).__name__,
+            #         "detail": str(ex),
+            #     })
+            # except Exception as ex:
+            #     print("ERROR NO CONTROLADO ENVIANDO ACTUALIZACIÓN:", type(ex).__name__, str(ex))
+            #     int_error("ACCOUNTING_TRANSFER_SEND_ERROR", status.HTTP_502_BAD_GATEWAY, meta={
+            #         "error_type": type(ex).__name__,
+            #         "detail": str(ex),
+            #     })
+ 
+            # if response.status_code < 200 or response.status_code >= 300:
+            #     print("CONTABILIDAD RESPONDIÓ ERROR EN ACTUALIZACIÓN")
+            #     print("STATUS CODE:", response.status_code)
+            #     print("RESPONSE TEXT:", response.text)
+            #     external_response_data = None
+            #     try:
+            #         external_response_data = response.json()
+            #     except Exception:
+            #         external_response_data = {"raw_text": response.text}
+            #     int_error("ACCOUNTING_TRANSFER_SEND_ERROR", status.HTTP_502_BAD_GATEWAY, meta=response.text)
+ 
+            # try:
+            #     accounting_response_data = response.json()
+            # except ValueError:
+            #     print("CONTABILIDAD NO DEVOLVIÓ JSON VÁLIDO EN ACTUALIZACIÓN")
+            #     int_error("ACCOUNTING_TRANSFER_INVALID_RESPONSE", status.HTTP_502_BAD_GATEWAY)
+ 
+            # # Validar success
+            # accounting_response = AccountingTransferAccountingResponse(**accounting_response_data)
+            # if accounting_response.success is False:
+            #     print("CONTABILIDAD REPORTÓ RESPUESTA NEGATIVA EN ACTUALIZACIÓN")
+            #     int_error("ACCOUNTING_TRANSFER_SEND_ERROR", status.HTTP_502_BAD_GATEWAY, meta=accounting_response_data)
+ 
+            simulated_exchange_id = upd_exchange_id
+            simulated_batch_id    = int(datetime.utcnow().strftime("%H%M%S"))
+ 
+            accounting_response_data = {
+                "success":    True,
+                "exchangeId": simulated_exchange_id,
+                "batchId":    simulated_batch_id,
+                "status":     "RECEIVED"
+            }
+ 
+            accounting_response = AccountingTransferAccountingResponse(**accounting_response_data)
+ 
+            print("==============================================")
+            print("RESPUESTA SIMULADA DE CONTABILIDAD (UPDATE)")
+            print("UPD_EXCHANGE_ID:", upd_exchange_id)
+            print("SIMULATED_BATCH_ID:", simulated_batch_id)
+            print("DATA:", accounting_response_data)
+            print("==============================================")
+ 
+
+            # ── 7. Construir el nuevo payload_json del comprobante ────────
+            # Se usan las listas COMPLETAS del estado actual (current_invoices /
+            # current_transactions), que incluyen tanto los documentos que
+            # cambiaron como los que permanecieron igual.  No se puede usar
+            # solo _extract_current_docs_from_diffs porque esa función omite
+            # los documentos sin cambio, dejando el comprobante incompleto.
+            new_invoices     = diff.get("current_invoices") or []
+            new_transactions = diff.get("current_transactions") or []
+ 
+            # Recalcular conteos reales desde las listas completas que se guardan.
+            # current_invoices/current_transactions ya incluyen los sin cambio,
+            # por lo que len() refleja el estado real del comprobante.
+            real_total_invoices     = len(new_invoices)
+            real_total_transactions = len(new_transactions)
+            real_total_documents    = real_total_invoices + real_total_transactions
+
+            corrected_summary = {
+                **(current_summary if current_summary else {}),
+                "TotalInvoices":     real_total_invoices,
+                "TotalTransactions": real_total_transactions,
+                "TotalDocuments":    real_total_documents,
+            }
+
+            updated_payload_json = {
+                "metadata": {
+                    **old_metadata,
+                    "StandardVersion": new_std_version,
+                    "ExchangeId": upd_exchange_id,
+                },
+                "summary": corrected_summary,
+                "invoices": new_invoices,
+                "transactions": new_transactions,
+                "total": current_summary.get("TotalNet") or previous_summary.get("TotalNet") or 0,
+            }
+ 
+ 
+            # ── 8. Actualizar BD ─────────────────────────────────────────
+            # 8a. Resetear af_accounting_transfers
+            self.repo.reset_accounting_transfer_for_update(
+                db=db,
+                transfer_id=transfer_id,
+                new_exchange_id=original_exchange_id,
+                new_payload_json=updated_payload_json,
+            )
+ 
+            # 8b. Eliminar y recrear af_audit_receipts
+            self.repo.delete_audit_receipts_by_transfer(
+                db=db,
+                accounting_transfer_id=transfer_id,
+            )
+ 
+            self.repo.create_accounting_audit_receipts(
+                db=db,
+                accounting_transfer_id=transfer_id,
+                accounting_entry_id=original_exchange_id,
+                normalized_json=updated_payload_json,
+            )
+ 
+            # 8c. Obtener config del endpoint para registrar la nueva queue
+            endpoint_config = self.repo.get_accounting_consult_endpoint(
+                db,
+                source_project_id,
+                external_endpoint_id
+            )
+ 
+            actor_id = self._get_actor_id(current_user)
+            endpoint_name = (
+                self._get_value(endpoint_config, "endpoint_name")
+                if endpoint_config
+                else transaction_type
+            ) or transaction_type
+ 
+            # 8d. Crear nuevo registro en af_accounting_queue
+            self.repo.create_accounting_queue(
+                db=db,
+                source_project_id=source_project_id,
+                source_module_code=endpoint_name,
+                transaction_type=endpoint_name,
+                transaction_data=agro_fusion_update_payload,
+                user_id=actor_id,
+            )
+ 
+            db.commit()
+ 
+            # ── 9. Registrar auditoría ────────────────────────────────────
+            self._log_update_accounting_voucher_audit(
+                db=db,
+                current_user=current_user,
+                transfer_id=transfer_id,
+                source_project_id=source_project_id,
+                upd_exchange_id=upd_exchange_id,
+                outcome="success",
+                ip=ip,
+                user_agent=user_agent,
+            )
+ 
+            return AccountingUpdateResponse(
+                success=True,
+                message_code="ACCOUNTING_UPDATE_SENT",
+                transfer_id=transfer_id,
+                new_exchange_id=upd_exchange_id,
+                accounting_response=accounting_response_data,
+                sent_payload=agro_fusion_update_payload,  
+
+            )
+ 
+        except Exception:
+            db.rollback()
+ 
+            self._log_update_accounting_voucher_audit(
+                db=db,
+                current_user=current_user,
+                transfer_id=transfer_id,
+                source_project_id=None,
+                upd_exchange_id=None,
+                outcome="failure",
+                ip=ip,
+                user_agent=user_agent,
+            )
+ 
+            raise
+ 
+    # ──────────────────────────────────────────────────────────────────────────
+    # Helpers privados exclusivos del flujo de actualización
+    # ──────────────────────────────────────────────────────────────────────────
+ 
+    def _build_upd_exchange_id(self, original_exchange_id: str) -> str:
+        """
+        Convierte AF-YYYY-MM-XXXXXXX  →  AF-UPD-YYYY-MM-XXXXXXX
+        Si el ID ya tiene UPD (re-actualización), lo mantiene.
+        Si el formato no es el esperado, prefija AF-UPD- de forma segura.
+        """
+        if not original_exchange_id:
+            return "AF-UPD-UNKNOWN"
+ 
+        parts = original_exchange_id.split("-")
+ 
+        # Caso: AF-2026-05-XXXXX  (4 partes mínimo con "AF" al inicio)
+        if len(parts) >= 2 and parts[0].upper() == "AF" and parts[1].upper() != "UPD":
+            parts.insert(1, "UPD")
+            return "-".join(parts)
+ 
+        # Ya tiene UPD → devolver tal cual (idempotente)
+        if len(parts) >= 2 and parts[1].upper() == "UPD":
+            return original_exchange_id
+ 
+        # Fallback genérico
+        return f"AF-UPD-{original_exchange_id}"
+ 
+    def _increment_standard_version(self, version_str: str) -> str:
+        """
+        Suma 1.0 a la versión del estándar.
+        Ejemplo: "1.0" → "2.0", "2.0" → "3.0"
+        """
+        try:
+            major = int(float(version_str))
+            return f"{major + 1}.0"
+        except (ValueError, TypeError):
+            return "2.0"
+ 
+    def _build_update_invoice_changes(self, invoice_diffs: list) -> list:
+        """
+        Construye la lista Changes.Invoices del AgroFusionExchangeUpdate.
+        Mapea: created → CREATED, modified → MODIFIED, deleted → DELETED
+        (el estándar usa CANCELLED solo para el ejemplo, el cliente prefiere DELETED)
+        """
+        changes = []
+ 
+        for diff in invoice_diffs:
+            change_type = diff.get("change_type", "").lower()
+            previous    = diff.get("previous") or {}
+            current     = diff.get("current") or {}
+ 
+            # Usar current si existe, si no previous (para DELETED)
+            source = current if current else previous
+ 
+            header      = source.get("Header", {})
+            third_party = source.get("ThirdParty", {})
+            totals      = source.get("Totals", {})
+ 
+            if change_type == "deleted":
+                std_change_type = "DELETED"
+                reason = "DELETED_BY_USER"
+                previous_snapshot = {
+                    "Status": (previous.get("Header") or {}).get("Status"),
+                    "TotalPayment": (previous.get("Totals") or {}).get("TotalPayment"),
+                }
+                change_metadata = {
+                    "ChangeType": std_change_type,
+                    "Reason": reason,
+                    "DetectedFields": ["Header.Status"],
+                    "PreviousSnapshot": previous_snapshot,
+                }
+            elif change_type == "created":
+                std_change_type = "CREATED"
+                change_metadata = {
+                    "ChangeType": std_change_type,
+                    "Reason": "NEW_DOCUMENT",
+                    "DetectedFields": [],
+                    "PreviousSnapshot": None,
+                }
+            else:
+                # modified
+                std_change_type = "MODIFIED"
+                detected_fields = self._detect_changed_fields(previous, current)
+                prev_totals = (previous.get("Totals") or {})
+                change_metadata = {
+                    "ChangeType": std_change_type,
+                    "Reason": "DATA_CHANGE",
+                    "DetectedFields": detected_fields,
+                    "PreviousSnapshot": {
+                        "TotalPayment": prev_totals.get("TotalPayment"),
+                    },
+                }
+ 
+            changes.append({
+                "changeType": std_change_type,
+                "ChangeMetadata": change_metadata,
+                "Header": {
+                    "DocumentId":  header.get("DocumentId"),
+                    "Prefix":      header.get("Prefix"),
+                    "Serial":      header.get("Serial"),
+                    "Type":        header.get("Type"),
+                    "IssueDate":   header.get("IssueDate"),
+                    "DueDate":     header.get("DueDate"),
+                    "Status":      header.get("Status"),
+                },
+                "ThirdParty": {
+                    "NIT":  third_party.get("NIT"),
+                    "Name": third_party.get("Name"),
+                },
+                "Totals": {
+                    "TotalPayment":      totals.get("TotalPayment"),
+                    "OutstandingBalance": totals.get("OutstandingBalance"),
+                },
+            })
+ 
+        return changes
+ 
+    def _build_update_transaction_changes(self, transaction_diffs: list) -> list:
+        """
+        Construye la lista Changes.Transactions del AgroFusionExchangeUpdate.
+        """
+        changes = []
+ 
+        for diff in transaction_diffs:
+            change_type = diff.get("change_type", "").lower()
+            previous    = diff.get("previous") or {}
+            current     = diff.get("current") or {}
+ 
+            source = current if current else previous
+ 
+            if change_type == "deleted":
+                std_change_type = "DELETED"
+                prev_snapshot = {"Status": previous.get("Status"), "Amount": previous.get("Amount")}
+                change_metadata = {
+                    "ChangeType": std_change_type,
+                    "Reason": "DELETED_BY_USER",
+                    "DetectedFields": ["Status"],
+                    "PreviousSnapshot": prev_snapshot,
+                }
+            elif change_type == "created":
+                std_change_type = "CREATED"
+                change_metadata = {
+                    "ChangeType": std_change_type,
+                    "Reason": "NEW_TRANSACTION",
+                    "DetectedFields": [],
+                    "PreviousSnapshot": None,
+                }
+            else:
+                std_change_type = "MODIFIED"
+                detected_fields = [
+                    k for k in current
+                    if k in previous and self._canonical(current.get(k)) != self._canonical(previous.get(k))
+                ]
+                change_metadata = {
+                    "ChangeType": std_change_type,
+                    "Reason": "STATUS_CHANGE" if "Status" in detected_fields else "DATA_CHANGE",
+                    "DetectedFields": detected_fields,
+                    "PreviousSnapshot": {
+                        k: previous.get(k)
+                        for k in detected_fields
+                    },
+                }
+ 
+            changes.append({
+                "changeType": std_change_type,
+                "ChangeMetadata": change_metadata,
+                "DocumentId":      source.get("DocumentId"),
+                "Type":            source.get("Type"),
+                "Date":            source.get("Date"),
+                "RelatedInvoiceId": source.get("RelatedInvoiceId"),
+                "ThirdParty": {
+                    "NIT":  (source.get("ThirdParty") or {}).get("NIT"),
+                    "Name": (source.get("ThirdParty") or {}).get("Name"),
+                },
+                "Amount":   source.get("Amount"),
+                "Currency": source.get("Currency"),
+                "Status":   source.get("Status"),
+            })
+ 
+        return changes
+ 
+    def _extract_current_docs_from_diffs(self, diffs: list) -> list:
+        """
+        De una lista de diffs, retorna todos los documentos en su versión actual:
+        - created  → current
+        - modified → current
+        - deleted  → omitido (ya no existe)
+        """
+        docs = []
+        for diff in diffs:
+            change_type = diff.get("change_type", "").lower()
+            current = diff.get("current")
+            if change_type in ("created", "modified") and current:
+                docs.append(current)
+        return docs
+ 
+    def _detect_changed_fields(self, previous: dict, current: dict, prefix: str = "") -> list:
+        """
+        Detecta qué campos cambiaron entre previous y current (shallow + un nivel).
+        Retorna lista de paths como ["Totals.TotalPayment", "Header.Status"].
+        """
+        changed = []
+        all_keys = set(list(previous.keys()) + list(current.keys()))
+        for key in all_keys:
+            full_key = f"{prefix}{key}" if not prefix else f"{prefix}.{key}"
+            v_prev = previous.get(key)
+            v_curr = current.get(key)
+            if isinstance(v_prev, dict) and isinstance(v_curr, dict):
+                changed.extend(self._detect_changed_fields(v_prev, v_curr, prefix=full_key))
+            elif self._canonical(v_prev) != self._canonical(v_curr):
+                changed.append(full_key)
+        return changed
+ 
+    def _log_update_accounting_voucher_audit(
+        self,
+        db: Session,
+        current_user: dict,
+        transfer_id: str,
+        source_project_id: Optional[str],
+        upd_exchange_id: Optional[str],
+        outcome: str,
+        ip: str = None,
+        user_agent: str = None,
+    ):
+        """
+        Registra auditoría de la actualización contable con action_code UPDATE_ACCOUNTING_VOUCHERS.
+        """
+        try:
+            project = self._get_audit_project(db)
+ 
+            if project is None:
+                print("==============================================")
+                print("NO SE ENCONTRÓ PROYECTO DE AUDITORÍA (UPDATE)")
+                print("CODE: AGROFUSION")
+                print("==============================================")
+                return
+ 
+            project_id = self._get_value(project, "af_project_id", "project_id", "id")
+            actor_id   = self._get_actor_id(current_user)
+ 
+            self.audit_repo.log_event(
+                db=db,
+                action_code="UPDATE_ACCOUNTING_VOUCHERS",
+                outcome=outcome,
+                module_code="ACCOUNTING_VOUCHERS",
+                project_id=project_id,
+                actor_id=actor_id,
+                ip=ip,
+                user_agent=user_agent,
+                metadata={
+                    "transfer_id":        transfer_id,
+                    "source_project_id":  source_project_id,
+                    "upd_exchange_id":    upd_exchange_id,
+                },
+            )
+ 
+            print("==============================================")
+            print("AUDITORÍA UPDATE_ACCOUNTING_VOUCHERS REGISTRADA")
+            print("ACTION_CODE: UPDATE_ACCOUNTING_VOUCHERS")
+            print("OUTCOME:", outcome)
+            print("TRANSFER_ID:", transfer_id)
+            print("UPD_EXCHANGE_ID:", upd_exchange_id)
+            print("ACTOR_ID:", actor_id)
+            print("==============================================")
+ 
+        except Exception as ex:
+            print("==============================================")
+            print("ERROR REGISTRANDO AUDITORÍA UPDATE_ACCOUNTING_VOUCHERS")
+            print("ERROR:", type(ex).__name__)
+            print("DETALLE:", str(ex))
+            print("==============================================")
+

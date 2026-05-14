@@ -1,10 +1,13 @@
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.dependences.auth import get_current_user
 from app.schemas.checks import (
+    AccountingUpdateRequest,
+    AccountingUpdateResponse,
     CheckDetailResponse,
+    CheckRefreshResponse,
     ListChecksRequest,
     PaginatedChecksResponse,
     CheckTypeListResponse,
@@ -12,6 +15,9 @@ from app.schemas.checks import (
     AccountingConsultResponse,
     AccountingTransferRequest,
     AccountingTransferResponse,
+    AccountingACKRequest,
+    AccountingACKResponse,
+    AccountingACKRequest
 )
 from app.services.checks_service import ChecksService
 
@@ -668,5 +674,185 @@ def transfer_accounting_batch(
         user_agent=user_agent,
     )
 
+
+
+@router.post(
+    "/accounting-ACK",
+    summary="Recibir confirmación de procesamiento de lote contable",
+    description="""
+        Endpoint público que recibe la confirmación (ACK) del procesamiento de un lote contable
+        enviado previamente a contabilidad.
+
+        Según el estado recibido:
+        - Si status=PROCESSED: actualiza el lote como enviado y sus recibos de auditoría.
+        - Si hay documentos fallidos: marca el lote como fallido y registra los errores por documento.
+
+        Registra auditoría de la operación en af_audit_log.
+    """,
+    responses={
+        200: {
+            "description": "ACK procesado exitosamente",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "success": True,
+                        "message_code": "ACCOUNTING_ACK_PROCESSED",
+                        "exchange_id": "AF-2026-04-00001"
+                    }
+                }
+            },
+        },
+        400: {
+            "description": "Payload de ACK inválido o exchangeId faltante",
+            "content": {
+                "application/json": {
+                    "examples": {
+                        "exchange_id_required": {
+                            "summary": "ExchangeId obligatorio",
+                            "value": {
+                                "detail": {
+                                    "code": "ACCOUNTING_ACK_EXCHANGE_ID_REQUIRED",
+                                    "meta": {}
+                                }
+                            }
+                        },
+                        "status_required": {
+                            "summary": "Status obligatorio",
+                            "value": {
+                                "detail": {
+                                    "code": "ACCOUNTING_ACK_STATUS_REQUIRED",
+                                    "meta": {}
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        },
+        404: {
+            "description": "No se encontró el lote contable para el exchangeId recibido",
+            "content": {
+                "application/json": {
+                    "example": {
+                        "detail": {
+                            "code": "ACCOUNTING_ACK_TRANSFER_NOT_FOUND",
+                            "meta": {}
+                        }
+                    }
+                }
+            },
+        },
+    },
+)
+def accounting_ack(
+    request: Request,
+    payload: AccountingACKRequest,
+    db: Session = Depends(get_db),
+):
+    service = ChecksService()
+
+    ip = request.headers.get("x-forwarded-for")
+
+    if ip:
+        ip = ip.split(",")[0].strip()
+    elif request.client:
+        ip = request.client.host
+    else:
+        ip = None
+
+    user_agent = request.headers.get("user-agent")
+
+    return service.process_accounting_ack(
+        db=db,
+        payload=payload,
+        ip=ip,
+        user_agent=user_agent,
+    )
+
+
+@router.get(
+    "/{transfer_id}/refresh",
+    response_model=CheckRefreshResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Re-consultar comprobante y obtener diferencias",
+    description=(
+        "Toma el endpoint externo y el periodo registrados en el comprobante, "
+        "vuelve a consultarlos y retorna el diff entre el payload almacenado "
+        "y la nueva respuesta. Solo incluye facturas y transacciones que hayan "
+        "sido creadas, modificadas o eliminadas."
+    ),
+)
+def refresh_check_diff(
+    transfer_id: str,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    service = ChecksService()
+
+    ip = request.client.host if request.client else None
+    user_agent = request.headers.get("user-agent")
+ 
+    return service.refresh_check_diff(
+        db=db,
+        transfer_id=transfer_id,
+        current_user=current_user,
+        ip=ip,
+        user_agent=user_agent,
+    )
+ 
+
+ 
+@router.post(
+    "/{transfer_id}/update-accounting",
+    response_model=AccountingUpdateResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Actualizar comprobante contable en contabilidad",
+    description=(
+        "Recibe el diff generado por el endpoint de comparación y envía una actualización "
+        "contable a contabilidad en formato AgroFusionExchangeUpdate. "
+        "Requiere permiso 046. "
+        "Actualiza el payload_json del comprobante con las facturas y transacciones actuales, "
+        "resetea el registro a estado PROCESSING para esperar un nuevo ACK, "
+        "recrea los af_audit_receipts y crea un nuevo af_accounting_queue."
+    ),
+)
+def update_accounting_voucher(
+    transfer_id: str,
+    body: AccountingUpdateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    **Flujo:**
+    1. Valida permiso `046`.
+    2. Obtiene el comprobante existente por `transfer_id`.
+    3. Construye el payload `AgroFusionExchangeUpdate` a partir del diff.
+    4. Envía a contabilidad usando el mismo endpoint y API key configurados.
+    5. Si el envío es exitoso:
+       - Actualiza `payload_json` del transfer con las facturas/transacciones actuales.
+       - Resetea `transfer_status = processing`, `retry_count = 0`, `acknowledged_at = NULL`.
+       - Elimina y recrea `af_audit_receipts`.
+       - Crea nuevo registro en `af_accounting_queue`.
+    6. Registra auditoría con `action_code = UPDATE_ACCOUNTING_VOUCHERS`.
+ 
+    **ExchangeId UPD:** `AF-2026-05-XXXXX` → `AF-UPD-2026-05-XXXXX`
+ 
+    **StandardVersion:** se incrementa en 1.0 respecto a la versión original.
+    """
+ 
+    ip = request.client.host if request.client else None
+    user_agent = request.headers.get("User-Agent")
+    service = ChecksService()
+
+    return service.update_accounting_voucher(
+        db=db,
+        transfer_id=transfer_id,
+        diff=body.diff,
+        current_user=current_user,
+        ip=ip,
+        user_agent=user_agent,
+    )
 
 router.include_router(vouchers_router)

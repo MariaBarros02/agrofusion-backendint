@@ -1,21 +1,69 @@
 """
+app/main.py
+
 Punto de entrada principal de la aplicación FastAPI.
 
-Inicializa la aplicación, configura middlewares globales
-y registra los routers de la API.
+Inicializa la aplicación, configura middlewares globales,
+registra los routers de la API y arranca el scheduler de
+reintentos contables.
 """
+
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from apscheduler.schedulers.background import BackgroundScheduler
 import uvicorn
+
 from app.routes.integration import router as router_integration
 from app.routes.checks import router as router_checks
+from app.scheduler.accounting_retry import retry_pending_accounting_transfers
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SCHEDULER
+# ─────────────────────────────────────────────────────────────────────────────
+
+scheduler = BackgroundScheduler()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Ciclo de vida de la aplicación:
+      - startup : arranca el scheduler de reintentos
+      - shutdown: detiene el scheduler limpiamente
+    """
+    # ── Startup ───────────────────────────────────────────────────────────
+    scheduler.add_job(
+        retry_pending_accounting_transfers,
+        trigger="interval",
+        minutes=1,                          # revisa cada 1 min
+        id="accounting_retry",
+        replace_existing=True,
+        max_instances=1,                     # nunca corre en paralelo
+    )
+    scheduler.start()
+    print("[SCHEDULER] Scheduler de reintentos contables iniciado.")
+    print("[SCHEDULER] Job: cada 1 min · reintenta transfers sin ACK > 30 min.")
+
+    yield  # ← la app corre aquí
+
+    # ── Shutdown ──────────────────────────────────────────────────────────
+    scheduler.shutdown(wait=False)
+    print("[SCHEDULER] Scheduler detenido.")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# APP
+# ─────────────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     root_path="/agrofusion/int",
-    title="API Inmero - Backend Integración Agrofusion",
-    version="1.3.0",
-    description="API de integración para el backend de Agrofusion, encargada de la transferencia de datos entre sistemas."
+    title="API Inmero - Backend Integración Agrofusion - Testing",
+    version="1.0.0",
+    description="API de integración para el backend de Agrofusion, encargada de la transferencia de datos entre sistemas.",
+    lifespan=lifespan,
 )
 # Orígenes permitidos para solicitudes CORS (frontend)
 origins = [
@@ -25,7 +73,7 @@ origins = [
     "https://inmero.co/agrofusion", # La subcarpeta del frontend
     "http://localhost:5173",   # Frontend local (Vite)
     "http://localhost:3000",   # Frontend alternativo
-    "http://127.0.0.1:5173",   # Backend / frontend local
+    "http://127.0.0.1:5173",
 ]
 # Middleware CORS para permitir comunicación entre frontend y backend
 app.add_middleware(
@@ -35,12 +83,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-# Registro de rutas relacionadas con integración
-app.include_router(router_integration)
-@app.get("/health")
-async def health_check():
-    return {"status": "ok"}
 
+app.include_router(router_integration)
 app.include_router(router_checks)
 @app.get("/health")
 async def health_check():
@@ -50,5 +94,5 @@ if __name__ == "__main__":
         "app.main:app",
         host="0.0.0.0",
         port=9001,
-        reload=True
+        reload=True,      
     )

@@ -1,8 +1,7 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Literal
 
 from datetime import date, datetime
-from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -66,6 +65,10 @@ class CheckListItemResponse(BaseModel):
         ...,
         description="Identificador único del comprobante",
         example="251f571"
+    )
+    accounting_entry_id: Optional[str] = Field(
+        None,
+        description="Identificador del asiento contable externo"
     )
     transaction_type: str = Field(
         ...,
@@ -338,7 +341,7 @@ class AccountingInvoiceHeader(BaseModel):
 
 
 class AccountingThirdParty(BaseModel):
-    NIT: str = Field(
+    NIT:Optional[str]  = Field(
         ...,
         description="Identificación tributaria del tercero",
         example="900123456"
@@ -562,6 +565,11 @@ class AccountingTransferRequest(BaseModel):
         description="Identificador del proyecto externo origen",
         example="6baa50f1-91e0-4eab-96bb-44b4ea380ddc"
     )
+    external_endpoint_id: str = Field(
+        ...,
+        description="Identificador del endpoint externo",
+        example="endpoint-001"
+    )
     normalized_json: Dict[str, Any] = Field(
         ...,
         description="JSON normalizado recibido desde el proyecto externo y enviado a contabilidad",
@@ -638,4 +646,194 @@ class AccountingTransferResponse(BaseModel):
     accounting_response: AccountingTransferAccountingResponse = Field(
         ...,
         description="Respuesta recibida desde contabilidad"
+    )
+
+
+class ACKDocumentResult(BaseModel):
+    documentId: str
+    documentType: str
+    status: str
+    accountingEntryId: Optional[int] = None
+    errorCode: Optional[str] = None
+    errorMessage: Optional[str] = None
+
+
+class AccountingACKRequest(BaseModel):
+    exchangeId: str
+    batchId: int
+    status: str
+    processedAt: Optional[str] = None
+    processedDocuments: Optional[List[ACKDocumentResult]] = []
+    failedDocuments: Optional[List[ACKDocumentResult]] = []
+
+
+class AccountingACKResponse(BaseModel):
+    success: bool
+    message_code: str
+    exchange_id: str
+
+
+
+# ── Consulta de refresh ─────────────────────────────────────────────────────
+
+class CheckRefreshRequest(BaseModel):
+    """
+    Body del endpoint POST /checks/{transfer_id}/refresh
+    Solo necesita el transfer_id (viene en la URL), pero se define
+    el schema por si en el futuro se requieren parámetros adicionales.
+    No se necesita pasar nada: el periodo y el endpoint se leen del registro.
+    """
+    pass  # transfer_id viene en path; todo lo demás se obtiene de BD
+
+
+# ── Elementos con indicación de cambio ─────────────────────────────────────
+
+class InvoiceDiff(BaseModel):
+    change_type: Literal["created", "modified", "deleted"] = Field(
+        ...,
+        description="Indica si la factura fue creada, modificada o eliminada",
+        example="modified"
+    )
+    previous: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Versión anterior de la factura (None si es nueva)"
+    )
+    current: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Versión actual de la factura (None si fue eliminada)"
+    )
+
+
+class TransactionDiff(BaseModel):
+    change_type: Literal["created", "modified", "deleted"] = Field(
+        ...,
+        description="Indica si la transacción fue creada, modificada o eliminada",
+        example="created"
+    )
+    previous: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Versión anterior de la transacción (None si es nueva)"
+    )
+    current: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Versión actual de la transacción (None si fue eliminada)"
+    )
+
+
+# ── Respuesta del diff ──────────────────────────────────────────────────────
+
+class CheckRefreshResponse(BaseModel):
+    """
+    Respuesta del endpoint de refresh/diff de comprobante.
+    """
+    has_changes: bool = Field(
+        ...,
+        description="Indica si existen diferencias entre el payload original y la nueva consulta",
+        example=True
+    )
+
+    # metadata y summary completos de AMBAS versiones
+    previous_metadata: Dict[str, Any] = Field(
+        ...,
+        description="Metadata del payload original almacenado en BD"
+    )
+    current_metadata: Dict[str, Any] = Field(
+        ...,
+        description="Metadata de la nueva consulta al endpoint externo"
+    )
+    previous_summary: Dict[str, Any] = Field(
+        ...,
+        description="Summary del payload original almacenado en BD"
+    )
+    current_summary: Dict[str, Any] = Field(
+        ...,
+        description="Summary de la nueva consulta al endpoint externo"
+    )
+
+    # Estado completo actual (todas las facturas/transacciones vigentes)
+    current_invoices: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Lista completa de facturas en su estado actual (incluye las no modificadas). "
+            "Se usa para reconstruir el payload_json completo al aplicar la actualización."
+        )
+    )
+    current_transactions: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Lista completa de transacciones en su estado actual (incluye las no modificadas). "
+            "Se usa para reconstruir el payload_json completo al aplicar la actualización."
+        )
+    )
+
+    # Solo las facturas/transacciones que cambiaron
+    invoice_diffs: List[InvoiceDiff] = Field(
+        default_factory=list,
+        description=(
+            "Facturas que fueron creadas, modificadas o eliminadas. "
+            "Las facturas sin cambios NO se incluyen."
+        )
+    )
+    transaction_diffs: List[TransactionDiff] = Field(
+        default_factory=list,
+        description=(
+            "Transacciones que fueron creadas, modificadas o eliminadas. "
+            "Las transacciones sin cambios NO se incluyen."
+        )
+    )
+
+
+
+ 
+class AccountingUpdateRequest(BaseModel):
+    """
+    Body del endpoint POST /checks/{transfer_id}/update-accounting
+    Recibe el diff generado por el endpoint de comparación.
+    """
+    diff: Dict[str, Any] = Field(
+        ...,
+        description="Objeto diff retornado por el endpoint de comparación (CheckRefreshResponse)",
+        example={
+            "has_changes": True,
+            "previous_metadata": {},
+            "current_metadata": {},
+            "previous_summary": {},
+            "current_summary": {},
+            "invoice_diffs": [],
+            "transaction_diffs": []
+        }
+    )
+ 
+ 
+class AccountingUpdateResponse(BaseModel):
+    """
+    Respuesta del endpoint de actualización contable.
+    """
+    success: bool = Field(
+        ...,
+        description="Indica si la actualización fue enviada exitosamente",
+        example=True
+    )
+    message_code: str = Field(
+        ...,
+        description="Código internacionalizable para mostrar en frontend",
+        example="ACCOUNTING_UPDATE_SENT"
+    )
+    transfer_id: str = Field(
+        ...,
+        description="Identificador del comprobante actualizado (mismo transfer_id de entrada)",
+        example="90640c8a-2bd8-40fc-b652-e68b960a19e0"
+    )
+    new_exchange_id: str = Field(
+        ...,
+        description="ExchangeId UPD generado y enviado a contabilidad",
+        example="AF-UPD-2026-05-5261922"
+    )
+    accounting_response: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Respuesta recibida desde contabilidad"
+    )
+    sent_payload: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Payload AgroFusionExchangeUpdate enviado a contabilidad"
     )

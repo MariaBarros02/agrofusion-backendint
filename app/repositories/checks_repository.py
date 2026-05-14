@@ -69,6 +69,7 @@ class ChecksRepository:
                 AfExternalProject.instance_code.label("project_code"),
                 AfAccountingTransfer.transfer_status.label("state"),
                 AfAccountingQueue.created_at.label("issued_at"),
+                AfAccountingTransfer.accounting_entry_id.label("accounting_entry_id"),
                 cast(
                     AfAccountingTransfer.payload_json["total"].astext,
                     Numeric
@@ -96,6 +97,7 @@ class ChecksRepository:
                     cast(AfAccountingTransfer.transfer_id, String).ilike(search),
                     AfExternalProject.project_name.ilike(search),
                     AfExternalProject.instance_code.ilike(search),
+                    AfAccountingTransfer.accounting_entry_id.ilike(search),
                     Users.name.ilike(search),
                 )
             )
@@ -560,6 +562,7 @@ class ChecksRepository:
         self,
         db: Session,
         external_project_id: str,
+        external_endpoint_id: str,
         since_period: str,
         until_period: str
     ):
@@ -577,8 +580,9 @@ class ChecksRepository:
 
             FROM public.af_accounting_transfers transfer
 
-            WHERE transfer.source_project_id = CAST(:external_project_id AS uuid)
-
+              WHERE transfer.source_project_id = CAST(:external_project_id AS uuid)
+              AND transfer.external_endpoint_id = CAST(:external_endpoint_id AS uuid)
+            
               AND transfer.payload_json #>> '{metadata,RequestedPeriod,From}' IS NOT NULL
               AND transfer.payload_json #>> '{metadata,RequestedPeriod,To}' IS NOT NULL
 
@@ -597,6 +601,7 @@ class ChecksRepository:
                 query,
                 {
                     "external_project_id": external_project_id,
+                    "external_endpoint_id": external_endpoint_id,
                     "since_period": since_period,
                     "until_period": until_period,
                 }
@@ -630,7 +635,9 @@ class ChecksRepository:
     def create_accounting_transfer(
         self,
         db: Session,
+        queue_id: str,
         external_project_id: str,
+        external_endpoint_id:str,
         transaction_type: str,
         payload_json: dict,
         accounting_entry_id: str
@@ -661,10 +668,11 @@ class ChecksRepository:
                 accounting_entry_id,
                 response_json,
                 error_message,
-                retry_count
+                retry_count,
+                external_endpoint_id
             )
             VALUES (
-                NULL,
+                CAST(:queue_id AS uuid),
                 CAST(:source_project_id AS uuid),
                 :transaction_type,
                 CAST(:payload_json AS jsonb),
@@ -674,7 +682,8 @@ class ChecksRepository:
                 :accounting_entry_id,
                 NULL,
                 NULL,
-                1
+                0,
+                CAST(:external_endpoint_id AS uuid)
             )
             RETURNING transfer_id
         """)
@@ -682,7 +691,9 @@ class ChecksRepository:
         transfer_id = db.execute(
             query,
             {
+                "queue_id": queue_id,
                 "source_project_id": external_project_id,
+                "external_endpoint_id": external_endpoint_id,
                 "transaction_type": transaction_type,
                 "payload_json": payload_json_text,
                 "accounting_entry_id": accounting_entry_id,
@@ -698,6 +709,83 @@ class ChecksRepository:
         print("==============================================")
 
         return transfer_id
+
+    def create_accounting_queue(
+        self,
+        db: Session,
+        source_project_id: str,
+        source_module_code: str,
+        transaction_type: str,
+        transaction_data: dict,
+        user_id: str
+    ):
+        """
+        Crea un registro en af_accounting_queue.
+        """
+
+        transaction_data_text = json.dumps(
+            transaction_data,
+            ensure_ascii=False,
+            default=str
+        )
+
+        query = text("""
+            INSERT INTO public.af_accounting_queue (
+                source_project_id,
+                source_module_code,
+                transaction_type,
+                transaction_data,
+                accounting_date,
+                user_id,
+                status,
+                priority,
+                attempts,
+                max_attempts,
+                last_error,
+                created_at,
+                processed_at,
+                sent_at,
+                external_transaction_id
+            )
+            VALUES (
+                CAST(:source_project_id AS uuid),
+                :source_module_code,
+                :transaction_type,
+                CAST(:transaction_data AS jsonb),
+                NOW(),
+                CAST(:user_id AS uuid),
+                'sent',
+                1,
+                1,
+                2,
+                NULL,
+                NOW(),
+                NULL,
+                NOW(),
+                NULL
+            )
+            RETURNING queue_id
+        """)
+
+        queue_id = db.execute(
+            query,
+            {
+                "source_project_id": source_project_id,
+                "source_module_code": source_module_code,
+                "transaction_type": transaction_type,
+                "transaction_data": transaction_data_text,
+                "user_id": user_id
+            }
+        ).scalar()
+
+        print("==============================================")
+        print("QUEUE CONTABLE REGISTRADO")
+        print("QUEUE_ID:", queue_id)
+        print("SOURCE_PROJECT_ID:", source_project_id)
+        print("TRANSACTION_TYPE:", transaction_type)
+        print("==============================================")
+
+        return queue_id
 
     def create_accounting_audit_receipts(
         self,
@@ -859,3 +947,433 @@ class ChecksRepository:
             print("SOURCE_SYSTEM_ID:", source_system_id)
             print("PAYLOAD_EXCERPT:", payload_excerpt_json)
             print("==============================================")
+
+    def get_accounting_transfer_by_exchange_id(
+        self,
+        db: Session,
+        exchange_id: str,
+    ):
+        """
+        Busca un registro en af_accounting_transfers
+        por accounting_entry_id = exchangeId recibido en el ACK.
+        """
+
+        query = text("""
+            SELECT
+                transfer_id,
+                source_project_id,
+                transfer_status,
+                accounting_entry_id
+            FROM public.af_accounting_transfers
+            WHERE accounting_entry_id = :exchange_id
+            LIMIT 1
+        """)
+
+        result = db.execute(
+            query,
+            {"exchange_id": exchange_id}
+        ).fetchone()
+
+        print("==============================================")
+        print("BÚSQUEDA af_accounting_transfers POR EXCHANGE_ID")
+        print("EXCHANGE_ID:", exchange_id)
+        print("ENCONTRADO:", result is not None)
+        print("==============================================")
+
+        return result
+
+    def update_accounting_transfer_ack(
+        self,
+        db: Session,
+        transfer_id: str,
+        transfer_status: str,
+        acknowledged_at,
+        response_json,
+        error_message=None,          # solo se usa cuando transfer_status == "failed"
+    ):
+        response_json_text = (
+            json.dumps(response_json, ensure_ascii=False, default=str)
+            if response_json is not None
+            else None
+        )
+
+
+        query = text("""
+            UPDATE public.af_accounting_transfers
+            SET
+                transfer_status = :transfer_status,
+                acknowledged_at = :acknowledged_at,
+                response_json   = CAST(:response_json AS jsonb),
+                error_message   = :error_message
+            WHERE transfer_id = CAST(:transfer_id AS uuid)
+        """)
+
+        db.execute(query, {
+            "transfer_status": transfer_status,
+            "acknowledged_at": acknowledged_at,
+            "response_json":   response_json_text,
+            "error_message":   error_message_text,
+            "transfer_id":     transfer_id,
+        })
+
+    def update_accounting_queue_status(
+        self,
+        db: Session,
+        transfer_id: str,
+        queue_status: str,
+        processed_at,
+    ):
+        query = text("""
+            UPDATE public.af_accounting_queue q
+            SET
+                status       = :queue_status,
+                processed_at = :processed_at
+            FROM public.af_accounting_transfers t
+            WHERE t.queue_id   = q.queue_id
+            AND t.transfer_id = CAST(:transfer_id AS uuid)
+        """)
+
+        result = db.execute(query, {
+            "queue_status": queue_status,
+            "processed_at": processed_at,
+            "transfer_id":  transfer_id,
+        })
+
+        print("==============================================")
+        print("af_accounting_queue ACTUALIZADO POR ACK")
+        print("TRANSFER_ID:",     transfer_id)
+        print("STATUS:",          queue_status)
+        print("PROCESSED_AT:",    processed_at)
+        print("FILAS AFECTADAS:", result.rowcount)
+        print("==============================================")
+            
+
+    def update_audit_receipts_status(
+        self,
+        db: Session,
+        accounting_transfer_id: str,
+        status: str,
+    ):
+        """
+        Actualiza el status de TODOS los af_audit_receipts
+        que pertenecen a un af_accounting_transfers.
+
+        Se usa cuando el ACK llega exitoso (status = sent).
+        """
+
+        query = text("""
+            UPDATE public.af_audit_receipts
+            SET status = :status
+            WHERE accounting_transfer_id = CAST(:accounting_transfer_id AS uuid)
+        """)
+
+        result = db.execute(
+            query,
+            {
+                "status": status,
+                "accounting_transfer_id": accounting_transfer_id,
+            }
+        )
+
+        print("==============================================")
+        print("af_audit_receipts ACTUALIZADOS (LOTE COMPLETO)")
+        print("ACCOUNTING_TRANSFER_ID:", accounting_transfer_id)
+        print("STATUS:", status)
+        print("FILAS AFECTADAS:", result.rowcount)
+        print("==============================================")
+    def update_audit_receipt_sent(
+        self,
+        db: Session,
+        accounting_transfer_id: str,
+        document_id: str,
+    ):
+        query = text("""
+            UPDATE public.af_audit_receipts
+            SET status = 'sent'
+            WHERE
+                accounting_transfer_id = :accounting_transfer_id
+                AND (
+                    payload->>'DocumentId' = :document_id
+                    OR payload->'Header'->>'DocumentId' = :document_id
+                )
+        """)
+
+        result = db.execute(query, {
+            "accounting_transfer_id": accounting_transfer_id,
+            "document_id": document_id,
+        })
+
+        print("==============================================")
+        print("af_audit_receipt MARCADO COMO SENT (PARCIAL)")
+        print("ACCOUNTING_TRANSFER_ID:", accounting_transfer_id)
+        print("DOCUMENT_ID:", document_id)
+        print("FILAS AFECTADAS:", result.rowcount)
+        print("==============================================")
+
+
+    def update_audit_receipt_failed(
+        self,
+        db: Session,
+        accounting_transfer_id: str,
+        document_id: str,
+        failed_at,
+        error_log: dict,
+    ):
+        error_log_text = json.dumps(error_log, ensure_ascii=False, default=str)
+
+        query = text("""
+            UPDATE public.af_audit_receipts
+            SET
+                status    = 'failed',
+                failed_at = :failed_at,
+                error_log = :error_log
+            WHERE
+                accounting_transfer_id = :accounting_transfer_id
+                AND (
+                    payload->>'DocumentId' = :document_id
+                    OR payload->'Header'->>'DocumentId' = :document_id
+                )
+        """)
+
+        result = db.execute(query, {
+            "failed_at":              failed_at,
+            "error_log":              error_log_text,
+            "accounting_transfer_id": accounting_transfer_id,
+            "document_id":            document_id,
+        })
+
+        print("==============================================")
+        print("af_audit_receipt MARCADO COMO FAILED")
+        print("ACCOUNTING_TRANSFER_ID:", accounting_transfer_id)
+        print("DOCUMENT_ID:",           document_id)
+        print("FAILED_AT:",             failed_at)
+        print("ERROR_LOG:",             error_log_text)
+        print("FILAS AFECTADAS:",       result.rowcount)
+        print("==============================================")
+
+
+    def get_transfer_for_refresh(
+        self,
+        db: Session,
+        transfer_id: str,
+    ):
+        """
+        Obtiene los datos necesarios para re-consultar el endpoint externo
+        de un comprobante:
+          - af_accounting_transfers.external_endpoint_id
+          - af_accounting_transfers.source_project_id
+          - af_accounting_transfers.payload_json  (para extraer el periodo)
+          - af_external_endpoint + af_external_url para armar la URL completa
+
+        Retorna un mapping con:
+            transfer_id, external_endpoint_id, source_project_id,
+            payload_json, url, is_protected,
+            authorization_type, authorization_value
+        """
+
+        query = text("""
+            SELECT
+                t.transfer_id,
+                t.external_endpoint_id,
+                t.source_project_id,
+                t.payload_json,
+
+                CASE
+                    WHEN endpoint.external_url_id IS NULL
+                         AND (
+                             LOWER(endpoint.path) LIKE 'http://%%'
+                             OR LOWER(endpoint.path) LIKE 'https://%%'
+                         )
+                    THEN endpoint.path
+
+                    WHEN external_url.external_url_id IS NOT NULL
+                    THEN CONCAT(
+                        RTRIM(external_url.client_url, '/'),
+                        RTRIM(COALESCE(external_url.base_url, ''), '/'),
+                        '/',
+                        LTRIM(endpoint.path, '/')
+                    )
+
+                    ELSE endpoint.path
+                END AS url,
+
+                endpoint.is_protected,
+                NULL AS authorization_type,
+                NULL AS authorization_value
+
+            FROM public.af_accounting_transfers t
+            INNER JOIN public.af_external_endpoint endpoint
+                ON endpoint.external_endpoint_id = t.external_endpoint_id
+            LEFT JOIN public.af_external_url external_url
+                ON external_url.external_url_id = endpoint.external_url_id
+
+            WHERE t.transfer_id = CAST(:transfer_id AS uuid)
+              AND endpoint.is_active = TRUE
+              AND endpoint.deleted_at IS NULL
+            LIMIT 1
+        """)
+
+        row = (
+            db.execute(query, {"transfer_id": transfer_id})
+            .mappings()
+            .first()
+        )
+
+        if row:
+            print("==============================================")
+            print("TRANSFER FOR REFRESH ENCONTRADO")
+            print("TRANSFER_ID:", row.get("transfer_id"))
+            print("EXTERNAL_ENDPOINT_ID:", row.get("external_endpoint_id"))
+            print("SOURCE_PROJECT_ID:", row.get("source_project_id"))
+            print("URL:", row.get("url"))
+            print("IS_PROTECTED:", row.get("is_protected"))
+            print("==============================================")
+        else:
+            print("==============================================")
+            print("TRANSFER FOR REFRESH NO ENCONTRADO")
+            print("TRANSFER_ID:", transfer_id)
+            print("==============================================")
+
+        return row
+    
+
+# ── MÉTODO 1: Obtener el transfer completo por transfer_id ──────────────────
+ 
+    def get_transfer_full_by_id(
+        self,
+        db: Session,
+        transfer_id: str,
+    ):
+        """
+        Obtiene todos los datos necesarios del transfer para construir
+        el payload de actualización y hacer el envío a contabilidad:
+          - payload_json            (para leer metadata, summary, invoices, transactions originales)
+          - source_project_id       (para obtener el endpoint de transferencia)
+          - external_endpoint_id    (para obtener config de consulta)
+          - transaction_type        (para registrar la nueva queue)
+          - accounting_entry_id     (ExchangeId original)
+ 
+        Reutiliza get_accounting_transfer_endpoint internamente desde el servicio.
+        """
+ 
+        query = text("""
+            SELECT
+                t.transfer_id,
+                t.source_project_id,
+                t.external_endpoint_id,
+                t.transaction_type,
+                t.payload_json,
+                t.accounting_entry_id,
+                t.transfer_status,
+                ep.endpoint_name
+            FROM public.af_accounting_transfers t
+            INNER JOIN public.af_external_endpoint ep
+                ON ep.external_endpoint_id = t.external_endpoint_id
+            WHERE t.transfer_id = CAST(:transfer_id AS uuid)
+            LIMIT 1
+        """)
+ 
+        row = (
+            db.execute(query, {"transfer_id": transfer_id})
+            .mappings()
+            .first()
+        )
+ 
+        print("==============================================")
+        if row:
+            print("TRANSFER FULL ENCONTRADO")
+            print("TRANSFER_ID:", row.get("transfer_id"))
+            print("SOURCE_PROJECT_ID:", row.get("source_project_id"))
+            print("ACCOUNTING_ENTRY_ID:", row.get("accounting_entry_id"))
+            print("TRANSFER_STATUS:", row.get("transfer_status"))
+        else:
+            print("TRANSFER FULL NO ENCONTRADO")
+            print("TRANSFER_ID:", transfer_id)
+        print("==============================================")
+ 
+        return row
+ 
+    # ── MÉTODO 2: Resetear el transfer a estado PROCESSING para esperar nuevo ACK ──
+ 
+    def reset_accounting_transfer_for_update(
+        self,
+        db: Session,
+        transfer_id: str,
+        new_exchange_id: str,
+        new_payload_json: dict,
+    ):
+        """
+        Actualiza el registro existente en af_accounting_transfers para que quede
+        listo para esperar un nuevo ACK tras el envío de actualización:
+          - transfer_status  = 'processing'
+          - retry_count      = 0
+          - acknowledged_at  = NULL
+          - response_json    = NULL
+          - error_message    = NULL
+          - sent_at          = NOW()
+          - accounting_entry_id = new_exchange_id (ExchangeId UPD)
+          - payload_json     = nuevo payload con invoices/summary/transactions actualizados
+        """
+ 
+        new_payload_json_text = json.dumps(
+            new_payload_json,
+            ensure_ascii=False,
+            default=str
+        )
+ 
+        query = text("""
+            UPDATE public.af_accounting_transfers
+            SET
+                transfer_status     = 'processing',
+                retry_count         = 0,
+                acknowledged_at     = NULL,
+                response_json       = NULL,
+                error_message       = NULL,
+                sent_at             = NOW(),
+                accounting_entry_id = :new_exchange_id,
+                payload_json        = CAST(:new_payload_json AS jsonb)
+            WHERE transfer_id = CAST(:transfer_id AS uuid)
+        """)
+ 
+        result = db.execute(query, {
+            "transfer_id":      transfer_id,
+            "new_exchange_id":  new_exchange_id,
+            "new_payload_json": new_payload_json_text,
+        })
+ 
+        print("==============================================")
+        print("af_accounting_transfers RESETEADO PARA UPDATE")
+        print("TRANSFER_ID:", transfer_id)
+        print("NEW_EXCHANGE_ID:", new_exchange_id)
+        print("FILAS AFECTADAS:", result.rowcount)
+        print("==============================================")
+ 
+        return result.rowcount
+ 
+    # ── MÉTODO 3: Eliminar audit_receipts existentes de un transfer ─────────────
+ 
+    def delete_audit_receipts_by_transfer(
+        self,
+        db: Session,
+        accounting_transfer_id: str,
+    ):
+        """
+        Elimina todos los af_audit_receipts del transfer indicado
+        para volver a insertarlos con el nuevo payload actualizado.
+        """
+ 
+        query = text("""
+            DELETE FROM public.af_audit_receipts
+            WHERE accounting_transfer_id = CAST(:accounting_transfer_id AS uuid)
+        """)
+ 
+        result = db.execute(query, {"accounting_transfer_id": accounting_transfer_id})
+ 
+        print("==============================================")
+        print("af_audit_receipts ELIMINADOS PARA RE-CREACIÓN")
+        print("ACCOUNTING_TRANSFER_ID:", accounting_transfer_id)
+        print("FILAS ELIMINADAS:", result.rowcount)
+        print("==============================================")
+ 
+        return result.rowcount
+ 
