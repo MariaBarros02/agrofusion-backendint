@@ -1012,7 +1012,7 @@ class ChecksRepository:
             "transfer_status": transfer_status,
             "acknowledged_at": acknowledged_at,
             "response_json":   response_json_text,
-            "error_message":   error_message_text,
+            "error_message":   error_message,
             "transfer_id":     transfer_id,
         })
 
