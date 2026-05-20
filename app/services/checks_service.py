@@ -773,9 +773,9 @@ class ChecksService:
             ack_payload  = payload.dict()
 
             # ── 3. Procesar resultado ──────────────────────────────────────
-            if ack_status == "PROCESSED" and not has_failures:
+            if ack_status == "ACCEPTED" and not has_failures:
                 # ── 3a. Lote 100% exitoso ──────────────────────────────
-                transfer_status = "sent"
+                transfer_status = "accepted"
 
                 self.repo.update_accounting_transfer_ack(
                     db=db,
@@ -793,7 +793,7 @@ class ChecksService:
                 self.repo.update_audit_receipts_status(
                     db=db,
                     accounting_transfer_id=transfer_id,
-                    status="sent",
+                    status="accepted",
                 )
                 outcome      = "success"
                 message_code = "ACCOUNTING_ACK_PROCESSED"
@@ -846,7 +846,7 @@ class ChecksService:
 
             else:
                 # ── 3c. Lote FAILED ───────────────────────────────────
-                transfer_status = "failed"
+                transfer_status = "rejected"
 
                 self.repo.update_accounting_transfer_ack(
                     db=db,
