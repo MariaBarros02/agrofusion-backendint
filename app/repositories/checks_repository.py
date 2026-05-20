@@ -989,7 +989,7 @@ class ChecksRepository:
         transfer_status: str,
         acknowledged_at,
         response_json,
-        error_message=None,          # solo se usa cuando transfer_status == "failed"
+        error_message=None,          # solo se usa cuando transfer_status == "rejected"
     ):
         response_json_text = (
             json.dumps(response_json, ensure_ascii=False, default=str)
