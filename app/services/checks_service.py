@@ -371,7 +371,7 @@ class ChecksService:
                 result.metadata.ExchangeId = "-".join(parts)
 
                 # #PRUEBAAA
-                result.metadata.SourceSystem.SystemNIT = "9001766666"
+                # result.metadata.SourceSystem.SystemNIT = "9001766666"
 
             except Exception as ex:
                 print("RESPUESTA EXTERNA NO CUMPLE EL CONTRATO ESPERADO")
