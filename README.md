@@ -41,9 +41,9 @@ Antes de ejecutar el backend, asegúrate de contar con:
 Ejecuta el comando correspondiente según el backend:
 
 ```bash
-git clone https://github.com/MariaBarros02/agrofusion-backendauth.git
-git clone https://github.com/MariaBarros02/agrofusion-backendaudit.git
-git clone https://github.com/MariaBarros02/agrofusion-backendint.git
+git clone https://github.com/Server-IA/agrofusion-backendauth.git
+git clone https://github.com/Server-IA/agrofusion-backendaudit.git
+git clone https://github.com/Server-IA/agrofusion-backendint.git
 ```
 Ingresa a la carpeta del backend clonado:
 
